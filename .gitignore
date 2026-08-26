@@ -1,0 +1,12 @@
+/node_modules/
+/data/
+/dist/
+.env
+*.log
+
+# The global excludes file (~/.gitignore_global) drops AGENTS.md and CLAUDE.md
+# from every repository. They belong in this one -- project memory is meant to
+# be committed -- and a repo-level rule outranks the global one. Without these
+# two lines a fresh clone has no documentation at all, and nothing warns you.
+!AGENTS.md
+!CLAUDE.md

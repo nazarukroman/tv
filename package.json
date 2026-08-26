@@ -1,0 +1,21 @@
+{
+  "name": "tv",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Телепрограмма двадцати эфирных каналов без рекламы",
+  "scripts": {
+    "ingest": "bun run src/ingest.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "lint": "oxlint"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.0",
+    "oxfmt": "0.65.0",
+    "oxlint": "1.80.0",
+    "typescript": "7.0.2"
+  }
+}

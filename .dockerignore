@@ -1,0 +1,12 @@
+node_modules
+data
+test
+.git
+.github
+*.md
+bun.lock
+tsconfig.json
+.oxfmtrc.json
+.oxlintrc.json
+.editorconfig
+.npmrc

@@ -1,0 +1,19 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "ignorePatterns": ["**/node_modules/**", "**/dist/**", "**/data/**", "**/*.d.ts", "**/*.min.js"],
+  "plugins": ["typescript", "import", "oxc"],
+  "categories": {
+    "correctness": "error",
+    "perf": "off",
+    "suspicious": "off",
+    "pedantic": "off",
+    "style": "off",
+    "restriction": "off"
+  },
+  "rules": {
+    "no-unused-vars": "off",
+    "@typescript-eslint/no-unused-vars": "off",
+    "no-console": "off",
+    "no-debugger": "error"
+  }
+}

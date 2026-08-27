@@ -1,16 +1,32 @@
 import { describe, expect, test } from 'bun:test';
 
-import { CHANNELS } from '../src/config/channels.ts';
+import { CHANNELS, DEFAULT_FAVOURITES, sourceIndex } from '../src/config/channels.ts';
+import { SOURCE_NAMES } from '../src/config/sources.ts';
 import { mskDayStartUtc } from '../src/lib/time.ts';
 import { durationLabel, escapeHtml, renderDayPage } from '../src/render/page.ts';
 
+import type { DayPageInput } from '../src/render/page.ts';
 import type { Programme } from '../src/lib/types.ts';
 
 const DAY = '2026-08-26';
 const DAYS: readonly string[] = [DAY];
+const SLUG = CHANNELS[0]!.slug;
 
-function prog(channelSlug: string, startUtc: number, stopUtc: number, title: string): Programme {
-  return { channelSlug, startUtc, stopUtc, day: DAY, title, description: undefined };
+function prog(channelSlug: string, startUtc: number, stopUtc: number, title: string, day: string = DAY): Programme {
+  return { channelSlug, startUtc, stopUtc, day, title, description: undefined };
+}
+
+/** One day's markup, with only the field a test actually cares about spelled out. */
+function page(programmes: readonly Programme[], overrides: Partial<DayPageInput> = {}): string {
+  return renderDayPage({
+    day: DAY,
+    days: DAYS,
+    programmes,
+    updatedUtc: 1000,
+    source: 'epg.one',
+    staleNote: undefined,
+    ...overrides,
+  });
 }
 
 /** The `<li>` for the row starting at `startUtc`, so its attributes can be inspected. */
@@ -47,26 +63,14 @@ describe('renderDayPage', () => {
     // A title is feed-controlled text landing straight into markup; unescaped
     // it is a stored XSS against every visitor who opens this day.
     const hostile = '<script>alert(1)</script> & "boom"';
-    const html = renderDayPage({
-      day: DAY,
-      days: DAYS,
-      programmes: [prog(CHANNELS[0]!.slug, 1000, 2000, hostile)],
-      updatedUtc: 1000,
-      staleNote: undefined,
-    });
+    const html = page([prog(SLUG, 1000, 2000, hostile)]);
 
     expect(html).not.toContain('<script>alert(1)</script>');
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;boom&quot;');
   });
 
   test('gives every configured channel a column, even with no programmes that day', () => {
-    const html = renderDayPage({
-      day: DAY,
-      days: DAYS,
-      programmes: [prog(CHANNELS[0]!.slug, 1000, 2000, 'Что-то')],
-      updatedUtc: 1000,
-      staleNote: undefined,
-    });
+    const html = page([prog(SLUG, 1000, 2000, 'Что-то')]);
 
     expect((html.match(/class="col"/g) ?? []).length).toBe(CHANNELS.length);
     for (const channel of CHANNELS.slice(1)) {
@@ -78,41 +82,145 @@ describe('renderDayPage', () => {
   test('round-trips start and duration through data-s and data-d', () => {
     const start = mskDayStartUtc(DAY) + 10 * 3600; // 10:00 MSK
     const stop = start + 25 * 60; // 25-minute programme
-    const html = renderDayPage({
-      day: DAY,
-      days: DAYS,
-      programmes: [prog(CHANNELS[0]!.slug, start, stop, 'Утренняя передача')],
-      updatedUtc: 1000,
-      staleNote: undefined,
-    });
+    const html = page([prog(SLUG, start, stop, 'Утренняя передача')]);
 
     expect(html).toContain(`data-s="${start}"`);
     expect(html).toContain('data-d="25"');
   });
 
-  test('marks data-prime only for programmes overlapping 18:00-24:00 MSK', () => {
+  test('collapses a long column around the start of prime time', () => {
+    // The server has no clock — one document is cached for everybody — so it
+    // folds around 18:00 and marks exactly the rows it kept. Getting this wrong
+    // does not throw: it silently shows the visitor ten past midnight.
     const dayStart = mskDayStartUtc(DAY);
-    const slug = CHANNELS[0]!.slug;
-    const overlapping = prog(slug, dayStart + 19 * 3600, dayStart + 20 * 3600, 'В прайм-тайм');
-    const outside = prog(slug, dayStart + 8 * 3600, dayStart + 9 * 3600, 'Утром');
-    const endsAt18 = prog(slug, dayStart + 17 * 3600, dayStart + 18 * 3600, 'До прайма');
-    const startsAt24 = prog(slug, dayStart + 24 * 3600, dayStart + 25 * 3600, 'После прайма');
+    const hourly = Array.from({ length: 24 }, (_, hour) =>
+      prog(SLUG, dayStart + hour * 3600, dayStart + (hour + 1) * 3600, `Час ${hour}`),
+    );
 
-    const html = renderDayPage({
-      day: DAY,
-      days: DAYS,
-      programmes: [overlapping, outside, endsAt18, startsAt24],
-      updatedUtc: 1000,
-      staleNote: undefined,
-    });
+    const html = page(hourly);
 
-    expect(rowFor(html, overlapping.startUtc)).toContain(' data-prime');
-    expect(rowFor(html, outside.startUtc)).not.toContain(' data-prime');
-    // Boundary: a programme ending exactly at 18:00 does not overlap the
-    // window at all — stop must be strictly greater than the window start.
-    expect(rowFor(html, endsAt18.startUtc)).not.toContain(' data-prime');
-    // Boundary: a programme starting exactly at 24:00 belongs to the next
-    // day's window, not this one — start must be strictly less than 24:00.
-    expect(rowFor(html, startsAt24.startUtc)).not.toContain(' data-prime');
+    expect(html).toContain('data-window');
+    expect((html.match(/ data-near/g) ?? []).length).toBe(3);
+    expect(rowFor(html, dayStart + 18 * 3600)).toContain(' data-near');
+    expect(rowFor(html, dayStart + 19 * 3600)).toContain(' data-near');
+    expect(rowFor(html, dayStart + 17 * 3600)).not.toContain(' data-near');
+  });
+
+  test('renders a programme carried over from the previous day at the top of the column', () => {
+    // The store hands these over so the column is not blank at 00:20. They are
+    // ordinary rows here — the point is only that the renderer does not assume
+    // every row starts inside the day it is rendering, which it would if it
+    // derived anything at all from `input.day` per row.
+    const dayStart = mskDayStartUtc(DAY);
+    const carried = prog(SLUG, dayStart - 20 * 60, dayStart + 75 * 60, 'Ночной эфир', '2026-08-25');
+    const html = page([carried, prog(SLUG, dayStart + 75 * 60, dayStart + 2 * 3600, 'Утро')]);
+
+    expect(html).toContain(`data-s="${carried.startUtc}"`);
+    expect(html).toContain('Ночной эфир');
+    // 23:40 of the previous evening, rendered as the clock reads, not as 00:00.
+    expect(html).toContain('<time>23:40</time>');
+  });
+
+  test('offers no control that hides a channel or a row', () => {
+    // Every channel is on the page and stays there; the only filtering left is
+    // the per-column unfold, which CSS owns. A stray prime-time checkbox or
+    // channel dialog surviving a refactor would put back a state in which the
+    // visitor sees less than the whole guide with no obvious way out.
+    const html = page([prog(SLUG, 1000, 2000, 'Что-то')]);
+
+    expect(html).not.toContain('id="prime"');
+    expect(html).not.toContain('data-prime');
+    expect(html).not.toContain('id="pick"');
+    expect(html).not.toContain('<dialog');
+  });
+
+  test('gives every column a star, and starts them all unpressed', () => {
+    // The star is the only channel control there is now, so it has to be on
+    // every column — including one with no programmes, which is still a channel
+    // the visitor may want at the top tomorrow.
+    const html = page([prog(SLUG, 1000, 2000, 'Что-то')]);
+
+    expect((html.match(/class="star"/g) ?? []).length).toBe(CHANNELS.length);
+    // The server cannot know who is reading, so the markup is neutral and the
+    // boot script settles it. Rendering any star pressed would be a lie for
+    // every visitor but one.
+    expect((html.match(/aria-pressed="false"/g) ?? []).length).toBe(CHANNELS.length);
+  });
+
+  test('carries a canonical link the boot script can read the day out of', () => {
+    // Boot decides `html.today` from this, not from the URL, because `/` serves
+    // the newest stored day when there is no today. It also has to be parsed
+    // before the boot script runs, so its position in <head> is load-bearing.
+    const html = page([prog(SLUG, 1000, 2000, 'Что-то')]);
+
+    expect(html).toContain(`<link rel="canonical" href="/day/${DAY}">`);
+    expect(html.indexOf('rel="canonical"')).toBeLessThan(html.indexOf('<script>'));
+  });
+
+  test('reports the feed and the time the run log actually recorded', () => {
+    // Both were previously invented by the renderer: the source was hardcoded to
+    // the primary, the time was whenever the page cache happened to be built.
+    expect(page([], { updatedUtc: mskDayStartUtc(DAY) + 9 * 3600 + 14 * 60, source: 'iptvx.one' })).toContain(
+      'Обновлено 09:14 МСК, источник iptvx.one',
+    );
+  });
+
+  test('claims no freshness at all when nothing has ever been ingested', () => {
+    // The empty database case. Printing the current time here is the one thing
+    // the footer must never do — it is the only staleness signal a visitor gets.
+    const html = page([], { updatedUtc: undefined, source: undefined });
+
+    expect(html).toContain('Расписание ещё ни разу не загружалось');
+    expect(html).not.toContain('Обновлено');
+  });
+
+  test('shows a banner when the guide came from the fallback feed', () => {
+    const html = page([], { staleNote: 'Данные из резервного источника iptvx.one' });
+
+    expect(html).toContain('<div class="stale">Данные из резервного источника iptvx.one</div>');
+  });
+});
+
+describe('DEFAULT_FAVOURITES', () => {
+  test('names only channels that exist', () => {
+    // Substituted into the client bundle and validated there against the same
+    // list, so a typo here does not fail loudly — it silently produces a
+    // default of nothing, and every visitor gets plain broadcast order.
+    const slugs = new Set(CHANNELS.map((channel) => channel.slug));
+    for (const slug of DEFAULT_FAVOURITES) {
+      expect(slugs.has(slug)).toBe(true);
+    }
+    expect(DEFAULT_FAVOURITES.length).toBeGreaterThan(0);
+  });
+});
+
+describe('CHANNELS', () => {
+  test('has a distinct slug per channel', () => {
+    expect(new Set(CHANNELS.map((channel) => channel.slug)).size).toBe(CHANNELS.length);
+  });
+
+  test('pins a distinct, non-empty id for every channel in every feed', () => {
+    // Two channels sharing an id would silently drop one of them: the id map is
+    // built id -> slug, so the second entry overwrites the first and that
+    // channel's column comes up empty with nothing reported anywhere.
+    for (const source of SOURCE_NAMES) {
+      const ids = CHANNELS.map((channel) => channel.sourceIds[source]);
+      expect(ids.every((id) => id.length > 0)).toBe(true);
+      expect(new Set(ids).size).toBe(CHANNELS.length);
+    }
+  });
+
+  test('builds a different id map per feed, each covering every channel', () => {
+    // The bug this pins down: one global map, built from the primary's ids and
+    // handed to whichever feed was being read. It made the fallback incapable of
+    // resolving a single channel, and it type-checked perfectly.
+    const [primary, fallback] = SOURCE_NAMES;
+    const first = sourceIndex(primary);
+    const second = sourceIndex(fallback);
+
+    expect(first.size).toBe(CHANNELS.length);
+    expect(second.size).toBe(CHANNELS.length);
+    expect([...first.keys()]).not.toEqual([...second.keys()]);
+    expect(new Set(first.values())).toEqual(new Set(second.values()));
   });
 });

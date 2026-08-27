@@ -1,8 +1,9 @@
 import { brotliCompressSync, constants as zlibConstants } from 'node:zlib';
 
 import { CHANNELS } from './config/channels.ts';
+import { SOURCES } from './config/sources.ts';
 import { openDatabase } from './db/schema.ts';
-import { countProgrammes, horizonUtc, programmesForDay } from './db/store.ts';
+import { countProgrammes, horizonUtc, programmesForDay, provenance } from './db/store.ts';
 import { mskDay } from './lib/time.ts';
 import { APP_ASSET } from './render/bundle.ts';
 import { renderDayPage } from './render/page.ts';
@@ -122,16 +123,31 @@ function fold(text: string): string {
 }
 
 /**
+ * A note for the top of the page when the guide is not built from the primary
+ * feed, or `undefined` when it is.
+ *
+ * The banner was declared in `DayPageInput` long before anything could produce
+ * one, because the fallback could not actually run. It can now, and a visitor
+ * looking at a guide assembled from the secondary feed should be told rather
+ * than left to notice the gaps.
+ */
+function staleNoteFor(source: string | undefined): string | undefined {
+  const primary = SOURCES[0]?.name;
+  return source === undefined || source === primary ? undefined : `Данные из резервного источника ${source}`;
+}
+
+/**
  * Renders every stored day up front.
  *
- * Fifteen small documents take milliseconds, so there is no partial
- * invalidation anywhere in this program — the whole set is rebuilt or none of
- * it is. Partial cache invalidation is where this class of service usually
- * starts serving yesterday under today's URL.
+ * Ten small documents take milliseconds, so there is no partial invalidation
+ * anywhere in this program — the whole set is rebuilt or none of it is. Partial
+ * cache invalidation is where this class of service usually starts serving
+ * yesterday under today's URL.
  */
 export async function buildSnapshot(db: Database): Promise<Snapshot> {
   const days = listDays(db);
-  const updatedUtc = nowUtc();
+  const { source, confirmedAtUtc } = provenance(db);
+  const staleNote = staleNoteFor(source);
   const pages = new Map<string, Encoded>();
   const search: SearchEntry[] = [];
 
@@ -144,13 +160,20 @@ export async function buildSnapshot(db: Database): Promise<Snapshot> {
     const programmes = programmesForDay(db, day);
 
     for (const programme of programmes) {
+      // A broadcast running across midnight is rendered on both days so neither
+      // column has a hole in it, but it is one broadcast and belongs to the day
+      // it started on. Indexing it under both would show it twice in results and
+      // link the second copy to a page that does not list it.
+      if (programme.day !== day) {
+        continue;
+      }
       search.push({
         hit: { d: day, s: programme.startUtc, c: programme.channelSlug, t: programme.title },
         haystack: fold(programme.title),
       });
     }
 
-    pages.set(day, encode(renderDayPage({ day, days, programmes, updatedUtc, staleNote: undefined })));
+    pages.set(day, encode(renderDayPage({ day, days, programmes, updatedUtc: confirmedAtUtc, source, staleNote })));
   }
 
   // Chronological, so results read as a timeline rather than grouped by
@@ -163,7 +186,7 @@ export async function buildSnapshot(db: Database): Promise<Snapshot> {
     search,
     programmes: countProgrammes(db),
     horizonUtc: horizonUtc(db),
-    builtAtUtc: updatedUtc,
+    builtAtUtc: nowUtc(),
   };
 }
 
@@ -171,12 +194,13 @@ export async function buildSnapshot(db: Database): Promise<Snapshot> {
  * Scans the flattened titles. Linear over a few thousand strings, in memory.
  *
  * The cap is taken from `nowUtc` outwards, not from the start of the index,
- * and that is the whole subtlety here. The store holds eight days behind and
- * six ahead; a common word like "новости" matches a couple of hundred times,
- * so filling the sixty slots in index order would return nothing but
- * programmes that finished days ago. Upcoming ones are what a schedule is for,
- * so they are taken first and the remaining slots are backfilled with the most
- * recent past. The answer stays in one chronological run either way.
+ * and that is the whole subtlety here. The store holds `RETENTION_DAYS` behind
+ * — three — and as far ahead as the feed reaches, about six; a common word like
+ * "новости" matches a couple of hundred times over that, so filling the sixty
+ * slots in index order would return nothing but programmes that finished days
+ * ago. Upcoming ones are what a schedule is for, so they are taken first and the
+ * remaining slots are backfilled with the most recent past. The answer stays in
+ * one chronological run either way.
  */
 export function searchSnapshot(
   entries: readonly SearchEntry[],
@@ -300,6 +324,17 @@ export async function startServer(db: Database, port: number): Promise<RunningSe
   const server = Bun.serve({
     port,
     hostname: '0.0.0.0',
+    // Explicit, not inherited from NODE_ENV. Left to the default, a container
+    // without NODE_ENV set answers a thrown handler with Bun's development
+    // error page — the stack and the source paths, to whoever sent the request.
+    development: false,
+    error(failure) {
+      // Nothing in the handler is supposed to throw; if something does, the
+      // operator gets the stack in the log and the visitor gets a sentence,
+      // rather than the other way round.
+      console.error('request failed:', failure);
+      return new Response('Что-то пошло не так\n', { status: 500 });
+    },
     fetch(request) {
       const url = new URL(request.url);
       const path = url.pathname;

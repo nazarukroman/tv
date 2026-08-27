@@ -14,16 +14,32 @@
  * character stream that the scanner consumes incrementally.
  */
 
-/** How long to wait for the first byte before giving up on a source. */
-const REQUEST_TIMEOUT_MS = 60_000;
+/**
+ * Connect and headers. Short on purpose: this is the phase where a dead host
+ * shows itself, and every second spent here is a second the fallback is not
+ * being tried.
+ */
+const HEADERS_TIMEOUT_MS = 20_000;
 
 /**
- * The whole `<channel>` section fits well inside this prefix — measured at
- * 3256 channels ending long before 1.5 MB of the archive. Validating the
- * pinned ids therefore costs a Range request, not a 25 MB download.
+ * The body, once headers are in. Generous on purpose, and separate from the
+ * budget above for a reason paid for in a real failure: one 60-second deadline
+ * covering both phases aborted a perfectly healthy download of the secondary
+ * feed mid-stream, which surfaced as "the source is unreachable" when the
+ * source was answering fine and simply had more bytes than epg.one.
+ *
+ * A slow transfer that never finishes is not a hang: this runs twice a day in
+ * the background, the guide keeps serving throughout, and the scheduler retries.
  */
-const CHANNEL_PREFIX_BYTES = 1_500_000;
+const TRANSFER_TIMEOUT_MS = 10 * 60_000;
 
+/**
+ * The two things fetching needs to know about a feed.
+ *
+ * Declared here rather than imported from `config/`, so that this module stays
+ * a library the configuration uses and not the other way round. `Source` in
+ * `config/sources.ts` satisfies it structurally.
+ */
 export interface FeedSource {
   /** Short name for logs and metrics, e.g. 'epg.one'. */
   readonly name: string;
@@ -62,6 +78,17 @@ function conditionalHeaders(validators: CacheValidators): Headers {
 }
 
 /**
+ * A pass-through whose only job is to say when the body has been read to the end.
+ *
+ * The transfer deadline has to be cancelled by whoever finishes reading, and
+ * that is the caller, several modules away. Hanging it off the end of the
+ * stream keeps the timer's lifetime tied to the thing it is timing.
+ */
+function onStreamEnd<T>(done: () => void): TransformStream<T, T> {
+  return new TransformStream<T, T>({ flush: done });
+}
+
+/**
  * Turns a gzipped response body into a character stream.
  *
  * `fetch` transparently decompresses when it negotiated the encoding itself,
@@ -90,56 +117,67 @@ function decodeBody(response: Response): ReadableStream<string> {
  * keep whatever it already stored rather than rewriting it.
  */
 export async function fetchFeed(source: FeedSource, validators: CacheValidators): Promise<FeedResponse> {
-  const response = await fetch(source.url, {
-    headers: conditionalHeaders(validators),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    redirect: 'follow',
-  });
+  const controller = new AbortController();
+  let timer = setTimeout(
+    () => controller.abort(new Error(`feed ${source.name}: no response headers within ${HEADERS_TIMEOUT_MS} ms`)),
+    HEADERS_TIMEOUT_MS,
+  );
+  const clear = (): void => clearTimeout(timer);
 
-  if (response.status === 304) {
-    // Drain nothing: a 304 has no body, but the connection is still ours to release.
-    await response.body?.cancel();
+  let response: Response;
+  try {
+    response = await fetch(source.url, {
+      headers: conditionalHeaders(validators),
+      signal: controller.signal,
+      redirect: 'follow',
+    });
+  } catch (error) {
+    clear();
+    // `cause` rather than a flattened message: the abort reason, the DNS
+    // failure and the TLS error all read the same once reduced to a string.
+    throw new Error(`feed ${source.name}: request failed`, { cause: error });
+  }
+
+  // Headers are in, so the short budget has done its job. The same controller
+  // now guards the body under the long one.
+  clear();
+  timer = setTimeout(
+    () => controller.abort(new Error(`feed ${source.name}: body stalled beyond ${TRANSFER_TIMEOUT_MS} ms`)),
+    TRANSFER_TIMEOUT_MS,
+  );
+  // A consumer that walks away without draining the stream must not keep the
+  // ingest process alive for ten minutes waiting on a timer for a request
+  // nobody is reading.
+  timer.unref();
+
+  try {
+    if (response.status === 304) {
+      // Drain nothing: a 304 has no body, but the connection is still ours to release.
+      await response.body?.cancel();
+      clear();
+      return {
+        notModified: true,
+        text: undefined,
+        etag: validators.etag,
+        lastModified: validators.lastModified,
+      };
+    }
+
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`feed ${source.name}: HTTP ${response.status} ${response.statusText}`);
+    }
+
+    // From here the stream owns the deadline: it is cleared when the last chunk
+    // has been handed over, not when this function returns.
     return {
-      notModified: true,
-      text: undefined,
-      etag: validators.etag,
-      lastModified: validators.lastModified,
+      notModified: false,
+      text: decodeBody(response).pipeThrough(onStreamEnd(clear)),
+      etag: response.headers.get('etag') ?? undefined,
+      lastModified: response.headers.get('last-modified') ?? undefined,
     };
+  } catch (error) {
+    clear();
+    throw error;
   }
-
-  if (!response.ok) {
-    throw new Error(`feed ${source.name}: HTTP ${response.status} ${response.statusText}`);
-  }
-
-  return {
-    notModified: false,
-    text: decodeBody(response),
-    etag: response.headers.get('etag') ?? undefined,
-    lastModified: response.headers.get('last-modified') ?? undefined,
-  };
-}
-
-/**
- * Fetches only the leading bytes of the archive — enough to carry the entire
- * `<channel>` section — so the pinned-id assertion does not cost a full
- * download.
- *
- * A server that ignores `Range` answers 200 with the whole body; that still
- * works, it is merely wasteful, so this is not treated as an error.
- */
-export async function fetchChannelPrefix(source: FeedSource): Promise<ReadableStream<string>> {
-  const response = await fetch(source.url, {
-    headers: new Headers({
-      'cache-control': 'no-cache',
-      range: `bytes=0-${CHANNEL_PREFIX_BYTES - 1}`,
-    }),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    redirect: 'follow',
-  });
-
-  if (!response.ok && response.status !== 206) {
-    throw new Error(`feed ${source.name}: HTTP ${response.status} on channel prefix`);
-  }
-
-  return decodeBody(response);
 }

@@ -29,6 +29,14 @@ describe('normaliseChannelName', () => {
     expect(normaliseChannelName('Первый канал HD 50')).toBe('первый канал');
   });
 
+  test('strips a quality marker that carries a digit', () => {
+    // '4k' sat in the token filter, which runs after digits are spaced apart —
+    // so by then it was the two tokens '4' and 'k' and could never match.
+    // 'Матч ТВ 4K' normalised to 'матч тв 4 k' and failed its own pin.
+    expect(normaliseChannelName('Матч ТВ 4K')).toBe('матч тв');
+    expect(matchesChannel('Матч ТВ', ['Матч ТВ 4K'])).toBe(true);
+  });
+
   test('strips a timeshift offset without eating the digits of a name', () => {
     expect(normaliseChannelName('МУЗ-ТВ +4')).toBe('муз тв');
     // The offset goes, but '1' and '24' are part of the identity and must stay.

@@ -94,11 +94,33 @@ if (import.meta.main) {
 
   scheduleForever(db, rebuild);
 
-  const shutdown = (): void => {
-    server.stop();
+  /**
+   * Stop accepting, let what is in flight finish, then close.
+   *
+   * `server.stop()` returns a promise and the previous version ignored it,
+   * closing the database and calling `process.exit` in the same tick — which
+   * cuts any response still being written. They are precompressed bytes, so the
+   * window is small, but a truncated page is served with a 200 and looks to the
+   * visitor like the site is broken rather than restarting.
+   *
+   * A second signal exits immediately: someone pressing Ctrl-C twice means it.
+   */
+  let stopping = false;
+  const shutdown = async (): Promise<void> => {
+    if (stopping) {
+      process.exit(130);
+    }
+    stopping = true;
+    await server.stop();
     db.close();
     process.exit(0);
   };
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', () => void shutdown());
+  process.on('SIGINT', () => void shutdown());
+
+  // An ingest that rejects outside the retry loop, or any other stray rejection,
+  // must not take the server down silently — nor pass unnoticed.
+  process.on('unhandledRejection', (reason) => {
+    console.error('unhandled rejection:', reason);
+  });
 }

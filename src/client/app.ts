@@ -6,10 +6,9 @@ import {
   windowAnchor,
   type Span,
 } from '../lib/schedule.ts';
-import { mskClock, mskDayStartUtc } from '../lib/time.ts';
+import { mskClock, mskDay, mskDayStartUtc } from '../lib/time.ts';
 import { el, setFlag } from './dom.ts';
-import { favouritesCss, toggleFavourite } from './favourites.ts';
-import { openPicker } from './picker.ts';
+import { favouritesFirst, toggleFavourite } from './favourites.ts';
 import { attachSearch } from './search.ts';
 import { currentFavourites, writeFavourites } from './storage.ts';
 
@@ -24,9 +23,9 @@ import { currentFavourites, writeFavourites } from './storage.ts';
  * of every channel and cannot know what time it is, because one document is
  * cached and served to everyone. So this file answers exactly the questions
  * that depend on the clock and on this visitor — what is on air, which three
- * rows are worth showing, which channels they picked — and answers them by
- * setting attributes the stylesheet is already waiting for. It never rebuilds
- * the guide.
+ * rows are worth showing, which channels they starred — and answers them by
+ * setting attributes the stylesheet is already waiting for, or by moving a
+ * column. It never rebuilds the guide.
  */
 
 interface Column {
@@ -121,13 +120,26 @@ interface LiveNow {
   readonly live: number;
 }
 
-function liveFavourites(columns: readonly Column[], favourites: readonly string[], now: number): readonly LiveNow[] {
+/**
+ * Stands in for "nothing is on air" in the strip's comparison key.
+ *
+ * A real key is a list of `slug:index` pairs, so it can never collide with
+ * this — and an empty string could not be used, because that is also the key
+ * the first run starts from.
+ */
+const EMPTY_STRIP = '-';
+
+/**
+ * What is on air, across every channel, starred ones first.
+ *
+ * Every channel, because every channel is on the page — a strip that covered
+ * only favourites would go blank for a visitor who has starred nothing, which
+ * is now an ordinary state rather than an impossible one. Starred first,
+ * because that is what a star means everywhere else on this page.
+ */
+function liveNow(columns: readonly Column[], favourites: readonly string[], now: number): readonly LiveNow[] {
   const entries: LiveNow[] = [];
-  for (const slug of favourites) {
-    const column = columns.find((each) => each.slug === slug);
-    if (column === undefined) {
-      continue;
-    }
+  for (const column of favouritesFirst(columns, favourites)) {
     const live = liveIndex(column.spans, now);
     if (live !== -1) {
       entries.push({ column, live });
@@ -162,6 +174,12 @@ function buildCard(entry: LiveNow, now: number, onOpen: (entry: LiveNow) => void
  * every sixty seconds, so between boundaries the cards are updated in place
  * and the nodes stay exactly where they were. Returns the key describing what
  * is currently shown, for the next call to compare against.
+ *
+ * An empty set fills the strip rather than removing it. The stylesheet reserves
+ * its height before first paint precisely so that filling it shifts nothing —
+ * hiding it afterwards spends that reservation in the opposite direction, and
+ * `[hidden]` beats the rule that made the room, so the whole guide jumped up
+ * 148 px. A sentence in the box costs nothing and moves nothing.
  */
 function updateStrip(
   track: Element,
@@ -171,6 +189,13 @@ function updateStrip(
   onOpen: (entry: LiveNow) => void,
 ): string {
   const key = entries.map((entry) => `${entry.column.slug}:${entry.live}`).join(',');
+
+  if (entries.length === 0) {
+    if (previousKey !== EMPTY_STRIP) {
+      track.replaceChildren(el('p', 'live-none', 'Сейчас ничего не идёт'));
+    }
+    return EMPTY_STRIP;
+  }
 
   if (key !== previousKey) {
     track.replaceChildren(...entries.map((entry) => buildCard(entry, now, onOpen)));
@@ -207,38 +232,33 @@ function applyStars(columns: readonly Column[], favourites: readonly string[]): 
 }
 
 /**
- * Puts a favourites list on screen for real: DOM order, the hiding rule, stars.
+ * Puts a favourites list on screen for real: DOM order and stars.
  *
  * This is also what retires the boot script's provisional CSS `order`. Both
  * produce the same picture, so swapping one for the other moves nothing — but
  * only this one leaves the reading order and the tab order matching what is
  * actually on screen. Running it at start-up is not redundant with boot; it is
  * the second half of the same manoeuvre.
+ *
+ * Columns are moved into place rather than re-appended wholesale. Reinserting a
+ * node blurs it, so appending all twenty would drop focus on every star press
+ * and, worse, on the very first run — when nothing has changed at all. This
+ * walks the two orders together and touches only the columns that actually
+ * differ, which for a visitor who has starred nothing is none of them.
  */
 function syncFavourites(guide: HTMLElement, columns: readonly Column[], favourites: readonly string[]): void {
-  // Choosing channels is the visitor restating what they want to see, which
-  // retires any column a search result had temporarily forced into view.
-  for (const column of columns) {
-    column.root.removeAttribute('data-revealed');
-  }
-
-  for (let index = favourites.length - 1; index >= 0; index -= 1) {
-    const column = columns.find((each) => each.slug === favourites[index]);
-    if (column !== undefined) {
-      guide.prepend(column.root);
+  let cursor = guide.firstElementChild;
+  for (const column of favouritesFirst(columns, favourites)) {
+    if (column.root === cursor) {
+      cursor = cursor.nextElementSibling;
+    } else {
+      guide.insertBefore(column.root, cursor);
     }
   }
 
-  const css = favouritesCss(favourites, columns.length, false);
-  let style = document.getElementById('fav-style');
-  if (style === null && css !== '') {
-    style = el('style');
-    style.id = 'fav-style';
-    document.head.append(style);
-  }
-  if (style !== null) {
-    style.textContent = css;
-  }
+  // The order rules were only ever scaffolding for the first paint, and they
+  // are exactly what makes the tab order disagree with the screen.
+  document.getElementById('fav-order')?.remove();
 
   applyStars(columns, favourites);
 }
@@ -272,6 +292,48 @@ function startTicker(run: () => void): void {
   schedule();
 }
 
+/**
+ * Makes `/` the address of today, wherever the visitor came in from.
+ *
+ * The dated routes are worth keeping: a day page is a separately cached,
+ * separately compressed document, the day tabs are ordinary links, and a search
+ * result has to be able to point at one particular broadcast on one particular
+ * day. What they are bad at is being bookmarked. Someone who lands on `/`,
+ * clicks through to Thursday and then saves the page keeps Thursday for ever,
+ * and the site they wanted a shortcut to shows a date further in the past every
+ * morning.
+ *
+ * So today gets one address instead of two. Only the browser can do this, and
+ * only after the page has arrived: pages are rebuilt twice a day and one of
+ * those builds is still being served after midnight, so at render time the
+ * server genuinely does not know which of its tabs is today.
+ *
+ * Two edits, both cheap:
+ *
+ *   - the tab for today points at `/` rather than at its own date, so clicking
+ *     it leaves the address bar on the durable URL;
+ *   - if the day already on screen is today and the address bar says otherwise,
+ *     it is rewritten in place. No navigation, no request, no reload — the bytes
+ *     at `/day/<today>` and at `/` are the same document.
+ *
+ * With scripting off nothing happens and every link is still a working dated
+ * one, which is why the server renders those and not this.
+ */
+function pinTodayToRoot(day: string): void {
+  const today = mskDay(Math.floor(Date.now() / 1000));
+
+  const tab = document.querySelector<HTMLAnchorElement>(`.days a[href="/day/${today}"]`);
+  if (tab !== null) {
+    tab.href = '/';
+  }
+
+  if (day === today && location.pathname !== '/') {
+    // `replaceState`, not `pushState`: this is the same page under its better
+    // name, not somewhere the back button should have to visit.
+    history.replaceState(null, '', `/${location.hash}`);
+  }
+}
+
 function start(guide: HTMLElement, header: HTMLElement, day: string): void {
   const columns = readColumns(guide);
   const dayStart = mskDayStartUtc(day);
@@ -284,20 +346,17 @@ function start(guide: HTMLElement, header: HTMLElement, day: string): void {
   const found = document.getElementById('found');
   const foundStatus = document.getElementById('found-n');
   const search = document.getElementById('q') as HTMLInputElement | null;
-  const pick = document.getElementById('pick') as HTMLButtonElement | null;
 
   let favourites = currentFavourites();
   let stripKey = '';
 
+  // Unfolding first: the row a result points at is almost always outside the
+  // three the column arrived collapsed to, and scrolling to a `display:none`
+  // row does nothing at all — which reads as a broken link.
   const expand = (column: Column, index: number): void => {
     if (column.unfold !== undefined) {
       column.unfold.checked = true;
     }
-    // Search spans all twenty channels, so a result can point at a column this
-    // visitor does not have. Scrolling to a `display:none` row does nothing at
-    // all, which reads as a broken link — so the column is shown for this page
-    // view without touching what they chose.
-    column.root.setAttribute('data-revealed', '');
     column.rows[index]?.scrollIntoView({ block: 'center' });
   };
 
@@ -342,13 +401,12 @@ function start(guide: HTMLElement, header: HTMLElement, day: string): void {
       updateColumn(column, now, primeFrom, today);
     }
 
-    if (track !== undefined && strip !== null) {
+    if (track !== undefined) {
       // Emptied rather than skipped when the day is not today. A page left open
       // across midnight would otherwise keep yesterday's cards on screen for
       // ever, since nothing else clears them.
-      const entries = today ? liveFavourites(columns, favourites, now) : [];
+      const entries = today ? liveNow(columns, favourites, now) : [];
       stripKey = updateStrip(track, entries, now, stripKey, (entry) => expand(entry.column, entry.live));
-      strip.hidden = entries.length === 0;
     }
   };
 
@@ -356,9 +414,8 @@ function start(guide: HTMLElement, header: HTMLElement, day: string): void {
     favourites = next;
     writeFavourites(next);
     syncFavourites(guide, columns, next);
-    if (pick !== null) {
-      pick.textContent = `Каналы (${next.length})`;
-    }
+    // The strip is ordered by favourites too, so the same list it was built
+    // from has just changed underneath it.
     stripKey = '';
     refresh();
   };
@@ -391,51 +448,46 @@ function start(guide: HTMLElement, header: HTMLElement, day: string): void {
     });
   }
 
-  if (pick !== null) {
-    pick.disabled = false;
-    pick.textContent = `Каналы (${favourites.length})`;
-    pick.addEventListener('click', () => {
-      openPicker(
-        columns.map(({ slug, name, hue }) => ({ slug, name, hue })),
-        favourites,
-        commit,
-      );
+  // The star in each column header is the whole of channel management: it is
+  // in the guide the visitor is already reading, it needs no dialog to open and
+  // nothing to close, and with scripting off it is simply absent rather than
+  // present and dead.
+  for (const column of columns) {
+    const star = column.star;
+    if (star === undefined) {
+      continue;
+    }
+    star.disabled = false;
+    star.addEventListener('click', () => {
+      // Starring moves the column, and moving a node takes it out of the
+      // document, which blurs it — a keyboard visitor would be silently
+      // returned to the top of the page. The button itself survives the move,
+      // so putting focus back is exact rather than approximate.
+      const hadFocus = document.activeElement === star;
+      commit(toggleFavourite(favourites, column.slug));
+      if (hadFocus) {
+        star.focus();
+      }
     });
   }
 
-  for (const column of columns) {
-    if (column.star !== undefined) {
-      column.star.disabled = false;
-    }
-    column.star?.addEventListener('click', () => {
-      const next = toggleFavourite(favourites, column.slug);
-      // Never down to nothing: an empty saved list is indistinguishable from
-      // never having chosen, so it would silently restore the defaults.
-      if (next.length === 0) {
-        return;
-      }
-      // Unstarring hides the column the button lives in, which blurs it and
-      // drops focus to <body> — a keyboard visitor would be silently returned
-      // to the top of the document. Hand focus to whichever star takes its
-      // place on screen, or to the control that manages channels.
-      const hadFocus = document.activeElement === column.star;
-      const position = favourites.indexOf(column.slug);
-      commit(next);
-      if (hadFocus) {
-        const successor = columns.find((each) => each.slug === next[Math.min(position, next.length - 1)]);
-        (successor?.star ?? pick)?.focus();
-      }
-    });
-  }
+  // Every write first, then every read. `scrollIntoView` forces a synchronous
+  // layout, so performing it between the column moves and the minute's worth of
+  // row attributes made the browser lay the guide out twice — measured at 53 ms
+  // of forced reflow on the mobile profile, all of it thrown away by the writes
+  // that came after it.
+  syncFavourites(guide, columns, favourites);
+  refresh();
+  pinTodayToRoot(day);
 
   // The day strip is a horizontal scroller that starts at the left, so on a
   // phone the day you are actually looking at can sit hundreds of pixels off
   // screen with no scrollbar to hint at it. `block: 'nearest'` keeps this
-  // inside the strip rather than scrolling the page.
+  // inside the strip rather than scrolling the page. Reading it here, after the
+  // columns have been moved, is also the only point at which the answer is the
+  // final one.
   document.querySelector('.days a[aria-current]')?.scrollIntoView({ inline: 'center', block: 'nearest' });
 
-  syncFavourites(guide, columns, favourites);
-  refresh();
   goToHash();
   // A result for the day already on screen is a same-document navigation, so
   // nothing reloads and nothing else would ever notice it.

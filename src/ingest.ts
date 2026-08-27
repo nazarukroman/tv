@@ -1,13 +1,13 @@
-import { CHANNELS, SOURCE_ID_TO_SLUG } from './config/channels.ts';
+import { CHANNELS, sourceIndex } from './config/channels.ts';
 import { MIN_PROGRAMMES, RETENTION_DAYS, SOURCES } from './config/sources.ts';
 import { openDatabase } from './db/schema.ts';
 import {
   countProgrammes,
   finishRun,
   lastValidators,
+  provenance,
   pruneBefore,
   replaceProgrammes,
-  SanityError,
   startRun,
 } from './db/store.ts';
 import { matchesChannel } from './lib/channel-name.ts';
@@ -16,7 +16,7 @@ import { scanXmltv } from './lib/xmltv.ts';
 
 import type { Database } from 'bun:sqlite';
 
-import type { FeedSource } from './lib/fetch.ts';
+import type { Source, SourceName } from './config/sources.ts';
 import type { Programme } from './lib/types.ts';
 
 /**
@@ -33,31 +33,38 @@ function nowUtc(): number {
 }
 
 /**
- * Fails the run when a pinned `sourceId` no longer carries the name we expect.
+ * Fails the run when a pinned id no longer carries the name we expect *in the
+ * feed being read*.
  *
- * This is the guard on the weakest part of the arrangement: epg.one's ids are
- * opaque integers with no stability promise. Without it, a renumbering
- * upstream would present as an empty column — working software showing
- * nothing, which is far worse than a loud failure.
+ * This is the guard on the weakest part of the arrangement: neither feed's ids
+ * are promised to us. Without it, a renumbering upstream would present as an
+ * empty column — working software showing nothing, which is far worse than a
+ * loud failure.
+ *
+ * The `source` parameter is not decoration. While there was one global id map,
+ * every id checked here was epg.one's, so this assertion could not pass against
+ * the fallback feed under any circumstances: it reported all twenty channels
+ * missing and took the run down with it.
  */
-function assertChannels(aliases: ReadonlyMap<string, readonly string[]>): void {
+export function assertChannels(source: SourceName, aliases: ReadonlyMap<string, readonly string[]>): void {
   const problems: string[] = [];
 
   for (const channel of CHANNELS) {
-    const names = aliases.get(channel.sourceId);
+    const id = channel.sourceIds[source];
+    const names = aliases.get(id);
     if (names === undefined) {
-      problems.push(`${channel.slug}: id ${channel.sourceId} absent from the feed`);
+      problems.push(`${channel.slug}: id ${id} absent from the feed`);
       continue;
     }
     if (!matchesChannel(channel.expectName, names)) {
       problems.push(
-        `${channel.slug}: id ${channel.sourceId} no longer looks like «${channel.expectName}» (aliases: ${names.slice(0, 4).join(', ')})`,
+        `${channel.slug}: id ${id} no longer looks like «${channel.expectName}» (aliases: ${names.slice(0, 4).join(', ')})`,
       );
     }
   }
 
   if (problems.length > 0) {
-    throw new Error(`channel mapping is stale:\n  ${problems.join('\n  ')}`);
+    throw new Error(`channel mapping is stale for ${source}:\n  ${problems.join('\n  ')}`);
   }
 }
 
@@ -68,17 +75,21 @@ interface ScanOutcome {
 
 /**
  * `minStopUtc` drops the archive tail during the scan rather than after the
- * write. The feed carries D-8 but retention keeps three days, so importing
- * everything meant inserting roughly a third of the rows only to delete them
- * again on the very same run.
+ * write. The primary feed carries D-8 but retention keeps three days, so
+ * importing everything meant inserting roughly a third of the rows only to
+ * delete them again on the very same run.
  */
-async function scanFeed(text: ReadableStream<string>, minStopUtc: number): Promise<ScanOutcome> {
+async function scanFeed(
+  text: ReadableStream<string>,
+  wanted: ReadonlyMap<string, string>,
+  minStopUtc: number,
+): Promise<ScanOutcome> {
   const programmes: Programme[] = [];
   const aliases = new Map<string, readonly string[]>();
 
-  await scanXmltv(text, SOURCE_ID_TO_SLUG, {
+  await scanXmltv(text, wanted, {
     onChannel: (channel) => {
-      if (SOURCE_ID_TO_SLUG.has(channel.id)) {
+      if (wanted.has(channel.id)) {
         aliases.set(channel.id, channel.names);
       }
     },
@@ -92,11 +103,17 @@ async function scanFeed(text: ReadableStream<string>, minStopUtc: number): Promi
   return { programmes, aliases };
 }
 
-export async function ingestFrom(db: Database, source: FeedSource): Promise<void> {
+export async function ingestFrom(db: Database, source: Source): Promise<void> {
   const runId = startRun(db, source.name, nowUtc());
 
   try {
-    const validators = lastValidators(db, source.name);
+    // A 304 is only safe to honour when the rows we hold came from *this* feed.
+    // After a fallback run the database holds the other one's data, and epg.one
+    // answering "your copy of my file is current" would be true and useless: it
+    // would keep the fallback's guide in place for as long as the primary's file
+    // sat unchanged, which is exactly when the primary has recovered.
+    const mine = provenance(db).source === source.name;
+    const validators = mine ? lastValidators(db, source.name) : { etag: undefined, lastModified: undefined };
     const response = await fetchFeed(source, validators);
 
     if (response.notModified || response.text === undefined) {
@@ -114,11 +131,11 @@ export async function ingestFrom(db: Database, source: FeedSource): Promise<void
     }
 
     const cutoffUtc = nowUtc() - RETENTION_DAYS * 86_400;
-    const { programmes, aliases } = await scanFeed(response.text, cutoffUtc);
+    const { programmes, aliases } = await scanFeed(response.text, sourceIndex(source.name), cutoffUtc);
     // Validate the mapping before touching stored data, never after.
-    assertChannels(aliases);
+    assertChannels(source.name, aliases);
 
-    const summary = replaceProgrammes(db, programmes, MIN_PROGRAMMES);
+    const summary = replaceProgrammes(db, programmes, MIN_PROGRAMMES[source.name]);
     // Clears rows that aged out since the last run; the scan already excluded
     // anything older, so this normally removes nothing.
     const pruned = pruneBefore(db, cutoffUtc);
@@ -139,7 +156,9 @@ export async function ingestFrom(db: Database, source: FeedSource): Promise<void
         `${summary.days} days, horizon ${horizon}, pruned ${pruned}`,
     );
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    // The whole chain, not just the outermost message: a network failure
+    // arrives wrapped, and «request failed» on its own says nothing at all.
+    const message = describe(error);
     finishRun(db, runId, nowUtc(), {
       ok: false,
       notModified: false,
@@ -154,26 +173,54 @@ export async function ingestFrom(db: Database, source: FeedSource): Promise<void
 }
 
 /**
+ * `Error: outer` plus every `cause` beneath it, so a wrapped failure still reads.
+ *
+ * Bounded, because nothing guarantees an error someone else constructed has an
+ * acyclic cause chain, and this runs on the path that is supposed to report the
+ * problem rather than become one.
+ */
+function describe(error: unknown, depth = 4): string {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+  const chain: string[] = [error.message];
+  let cause = error.cause;
+  while (cause instanceof Error && chain.length < depth) {
+    chain.push(cause.message);
+    cause = cause.cause;
+  }
+  return chain.join(': ');
+}
+
+/**
  * Tries each source in order, stopping at the first that succeeds.
  *
- * A `SanityError` is deliberately not fatal to the whole run: it means this
- * source answered with something degraded, which is exactly when the fallback
- * earns its place.
+ * Any `Error` from one source is non-fatal and the next is tried — an
+ * unreachable host, a stale pin and a suspiciously short document are all cases
+ * where the other feed is worth asking. Only a non-`Error` throw, which means a
+ * bug rather than a bad response, is re-raised immediately.
+ *
+ * The previous version singled out `SanityError` in that condition, which read
+ * as a policy but was not one: `SanityError extends Error`, so the clause could
+ * never change the outcome.
+ *
+ * Returns the source that answered, which is what the footer and the staleness
+ * banner report — a guide built from the fallback should say so.
  */
-export async function ingest(db: Database): Promise<void> {
+export async function ingest(db: Database): Promise<SourceName> {
   const failures: string[] = [];
 
   for (const source of SOURCES) {
     try {
       await ingestFrom(db, source);
-      return;
+      return source.name;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      failures.push(`${source.name}: ${message}`);
-      console.error(`${source.name} failed: ${message}`);
-      if (!(error instanceof SanityError) && !(error instanceof Error)) {
+      if (!(error instanceof Error)) {
         throw error;
       }
+      const message = describe(error);
+      failures.push(`${source.name}: ${message}`);
+      console.error(`${source.name} failed: ${message}`);
     }
   }
 
@@ -184,7 +231,10 @@ if (import.meta.main) {
   const path = process.env.TV_DB ?? DEFAULT_DB_PATH;
   const db = openDatabase(path);
   try {
-    await ingest(db);
+    const source = await ingest(db);
+    if (source !== SOURCES[0]?.name) {
+      console.warn(`primary source unavailable, guide built from ${source}`);
+    }
   } finally {
     db.close();
   }

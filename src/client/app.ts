@@ -1,9 +1,10 @@
 import {
-  collapsedWindow,
+  extendedWindow,
   liveIndex,
   progressPercent,
   remainingLabel,
   windowAnchor,
+  WINDOW_SIZE,
   type Span,
 } from '../lib/schedule.ts';
 import { mskClock, mskDay, mskDayStartUtc } from '../lib/time.ts';
@@ -22,7 +23,7 @@ import { currentFavourites, writeFavourites } from './storage.ts';
  * The shape of the work is the same throughout. The server rendered every row
  * of every channel and cannot know what time it is, because one document is
  * cached and served to everyone. So this file answers exactly the questions
- * that depend on the clock and on this visitor — what is on air, which three
+ * that depend on the clock and on this visitor — what is on air, which five
  * rows are worth showing, which channels they starred — and answers them by
  * setting attributes the stylesheet is already waiting for, or by moving a
  * column. It never rebuilds the guide.
@@ -34,30 +35,39 @@ interface Column {
   readonly hue: string;
   readonly root: HTMLElement;
   readonly rows: readonly HTMLElement[];
+  /** Every row: this day's, and the first few of the next one after them. */
   readonly spans: readonly Span[];
   /** The unfold checkbox. Owned by CSS; this file only ever ticks it. */
   readonly unfold: HTMLInputElement | undefined;
+  /** The «Ещё» button, which widens the window rather than unfolding it. */
+  readonly next: HTMLButtonElement | undefined;
   readonly star: HTMLButtonElement | undefined;
   /** One per column, moved between rows rather than created and destroyed. */
   meter: HTMLElement | undefined;
+  /** Rows asked for beyond the window's own size, five at a time. */
+  extra: number;
 }
 
 function readColumns(guide: HTMLElement): readonly Column[] {
   return [...guide.querySelectorAll<HTMLElement>('.col')].map((root) => {
     const rows = [...root.querySelectorAll<HTMLElement>('.p')];
+    const spans = rows.map((row) => {
+      const startUtc = Number(row.dataset.s);
+      return { startUtc, stopUtc: startUtc + Number(row.dataset.d) * 60 };
+    });
+
     return {
       slug: root.dataset.ch ?? '',
       name: root.querySelector('.col-name')?.textContent ?? '',
       hue: root.style.getPropertyValue('--h'),
       root,
       rows,
-      spans: rows.map((row) => {
-        const startUtc = Number(row.dataset.s);
-        return { startUtc, stopUtc: startUtc + Number(row.dataset.d) * 60 };
-      }),
+      spans,
       unfold: root.querySelector<HTMLInputElement>('.unfold') ?? undefined,
+      next: root.querySelector<HTMLButtonElement>('.next') ?? undefined,
       star: root.querySelector<HTMLButtonElement>('.star') ?? undefined,
       meter: undefined,
+      extra: 0,
     };
   });
 }
@@ -87,13 +97,28 @@ function setMeter(meter: HTMLElement, span: Span, now: number): void {
  *
  * Whether a column is *currently* folded is not this function's business: that
  * is the unfold checkbox, and CSS reads it directly. All that happens here is
- * that the three rows worth showing keep pointing at the right place.
+ * that the five rows worth showing keep pointing at the right place.
  */
 function updateColumn(column: Column, now: number, primeFromUtc: number, today: boolean): void {
   const live = today ? liveIndex(column.spans, now) : -1;
-  const window = column.root.hasAttribute('data-window')
-    ? collapsedWindow(column.spans, windowAnchor(column.spans, today ? now : undefined, primeFromUtc))
+  const folded = column.root.hasAttribute('data-window');
+  const window = folded
+    ? extendedWindow(column.spans, windowAnchor(column.spans, today ? now : undefined, primeFromUtc), column.extra)
     : undefined;
+
+  // A folded column with no window is the server and the browser disagreeing,
+  // which they should not: both fold the same rounded spans with the same
+  // constant. If it ever happens, showing the whole column is the harmless way
+  // to be wrong — the fold rule keys on the attribute, so the other reading
+  // would leave a heading with nothing under it.
+  const near = (index: number): boolean =>
+    folded && (window === undefined || (index >= window.from && index < window.to));
+
+  // Nothing after the window means «Ещё» has nothing to offer — the next day's
+  // rows are in this list too, so this really is the end of what the column
+  // holds. Everything left is *above* the anchor, and that is the checkbox's
+  // job, which is why the two controls are not interchangeable.
+  setFlag(column.root, 'data-end', window !== undefined && window.to >= column.spans.length);
 
   for (let index = 0; index < column.rows.length; index += 1) {
     const row = column.rows[index]!;
@@ -101,7 +126,7 @@ function updateColumn(column: Column, now: number, primeFromUtc: number, today: 
     // Only today has a past. Dimming every row of a day that is over says
     // nothing and just makes the page harder to read.
     setFlag(row, 'data-past', today && column.spans[index]!.stopUtc <= now);
-    setFlag(row, 'data-near', window !== undefined && index >= window.from && index < window.to);
+    setFlag(row, 'data-near', near(index));
   }
 
   if (live === -1) {
@@ -351,7 +376,7 @@ function start(guide: HTMLElement, header: HTMLElement, day: string): void {
   let stripKey = '';
 
   // Unfolding first: the row a result points at is almost always outside the
-  // three the column arrived collapsed to, and scrolling to a `display:none`
+  // five the column arrived collapsed to, and scrolling to a `display:none`
   // row does nothing at all — which reads as a broken link.
   const expand = (column: Column, index: number): void => {
     if (column.unfold !== undefined) {
@@ -410,6 +435,24 @@ function start(guide: HTMLElement, header: HTMLElement, day: string): void {
     }
   };
 
+  /**
+   * Shows five more of this column, further down the evening.
+   *
+   * It widens the window the server folded rather than revealing a slice of its
+   * own, because the window is recomputed on every minute tick: rows held open
+   * by anything else would be folded away again within sixty seconds.
+   *
+   * Forwards only — `extendedWindow` pins the top of the window — so this never
+   * uncovers programmes that have already been on. When there is nothing left
+   * below, `updateColumn` marks the column `data-end` and the stylesheet takes
+   * the button away; the earlier rows stay behind «…», which is the control
+   * that means "all of it".
+   */
+  const revealMore = (column: Column): void => {
+    column.extra += WINDOW_SIZE;
+    refresh();
+  };
+
   const commit = (next: readonly string[]): void => {
     favourites = next;
     writeFavourites(next);
@@ -453,6 +496,35 @@ function start(guide: HTMLElement, header: HTMLElement, day: string): void {
   // nothing to close, and with scripting off it is simply absent rather than
   // present and dead.
   for (const column of columns) {
+    if (column.next !== undefined) {
+      // Rendered disabled so it holds its space without pretending to work.
+      column.next.disabled = false;
+      column.next.addEventListener('click', () => {
+        const hadFocus = document.activeElement === column.next;
+        revealMore(column);
+        // The press that reaches the end of the day is also the press that
+        // takes the button away, and focus does not survive `display: none`.
+        // The checkbox is visually hidden but focusable and its label draws the
+        // ring, so a keyboard visitor lands on «…» rather than back at the top
+        // of the page.
+        if (hadFocus && column.next?.offsetParent === null) {
+          column.unfold?.focus();
+        }
+      });
+    }
+
+    column.unfold?.addEventListener('change', () => {
+      // Collapsing has to actually collapse. The extra rows were a request for
+      // more of this column, and «Свернуть» withdraws it — without this the
+      // window stays as wide as it was grown and the column visibly refuses to
+      // fold. A programmatic tick (a search result, a card in the strip) fires
+      // no `change`, so following a link never resets anything.
+      if (column.unfold?.checked === false) {
+        column.extra = 0;
+        refresh();
+      }
+    });
+
     const star = column.star;
     if (star === undefined) {
       continue;

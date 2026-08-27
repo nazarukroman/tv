@@ -1,4 +1,5 @@
 import { mskDay } from '../lib/time.ts';
+import { todayTabCss } from './day-tabs.ts';
 import { favouritesOrderCss } from './favourites.ts';
 import { currentFavourites } from './storage.ts';
 
@@ -16,6 +17,19 @@ import { currentFavourites } from './storage.ts';
  * because at this point in the parse there is no markup yet.
  */
 const root = document.documentElement;
+
+/**
+ * One stylesheet, under a name the application can find later.
+ *
+ * `#fav-order` is removed once the columns have been moved for real; the day-tab
+ * rule must survive that, so they are two elements rather than one string.
+ */
+function addStyle(id: string, css: string): void {
+  const style = document.createElement('style');
+  style.id = id;
+  style.textContent = css;
+  document.head.append(style);
+}
 
 // Tells the stylesheet that the collapsed columns can be unfolded again, and
 // that the controls needing scripting are worth showing. With scripting off
@@ -36,14 +50,18 @@ root.classList.add('js');
  */
 const canonical = document.querySelector('link[rel="canonical"]')?.getAttribute('href') ?? '';
 const onScreen = /\/day\/(\d{4}-\d{2}-\d{2})/.exec(canonical)?.[1];
-if (onScreen !== undefined && onScreen === mskDay(Math.floor(Date.now() / 1000))) {
+const today = mskDay(Math.floor(Date.now() / 1000));
+if (onScreen !== undefined && onScreen === today) {
   root.classList.add('today');
 }
 
+// Unconditional, and not only when today is the day on screen: the tab for
+// today is on all fifteen pages, and it should read «Сегодня» on every one of
+// them. On a page whose window no longer contains today the rule simply matches
+// nothing.
+addStyle('today-tab', todayTabCss(today));
+
 const css = favouritesOrderCss(currentFavourites());
 if (css !== '') {
-  const style = document.createElement('style');
-  style.id = 'fav-order';
-  style.textContent = css;
-  document.head.append(style);
+  addStyle('fav-order', css);
 }

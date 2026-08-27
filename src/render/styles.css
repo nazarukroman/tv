@@ -148,7 +148,8 @@ html:not(.js) .star {
 }
 /* Present and holding their space, but plainly not available yet. */
 #q:disabled,
-.star:disabled {
+.star:disabled,
+.next:disabled {
   opacity: 0.5;
   cursor: default;
 }
@@ -204,6 +205,14 @@ h1 {
   color: var(--bg);
   border-color: var(--fg);
   font-weight: 600;
+}
+/* Every tab carries both labels, because the server cannot tell which day is
+   today — pages are rebuilt twice a day and one build outlives midnight. The
+   boot script swaps exactly one of them from inside <head>, before the first
+   paint: doing it later would change a tab's width and shift every tab after
+   it. */
+.days .now {
+  display: none;
 }
 
 /* Holds the clock and nothing else, so it exists only on the day that has one.
@@ -481,10 +490,21 @@ html.today .live {
   background: var(--accent);
 }
 
-.more {
+/* Two controls under a folded column: «Ещё 5», which the application drives,
+   and «…», which CSS drives on its own. Only the second one is guaranteed to
+   work — see the note in render/page.ts — so only the second one is offered
+   without scripting, which is to say never, since nothing folds without it. */
+.tools {
   display: none;
-  align-self: flex-start;
+  align-items: center;
+  gap: 0.375rem;
   margin: 0.5rem 0.25rem 0.25rem;
+}
+html.js .col[data-window] .tools {
+  display: flex;
+}
+.next,
+.more {
   padding: 0.375rem 0.625rem;
   background: transparent;
   border: 1px solid var(--edge);
@@ -493,8 +513,14 @@ html.today .live {
   color: var(--muted);
   cursor: pointer;
 }
-html.js .col[data-window] .more {
-  display: inline-block;
+/* Square enough to read as an icon rather than as a truncated word, and wide
+   enough for the 24px target WCAG 2.5.8 asks of a control. */
+.more {
+  min-width: 2rem;
+  text-align: center;
+  line-height: 1;
+  padding-top: 0.5rem;
+  padding-bottom: 0.5rem;
 }
 .unfold:focus-visible + .more {
   outline: 2px solid var(--fg);
@@ -509,18 +535,31 @@ html.js .col[data-window] .more {
 .col:has(.unfold:checked) .more .shut {
   display: inline;
 }
+/* «Ещё» only ever goes forwards, so it is gone in the two cases where there is
+   no "forwards" left: the column is fully open, or the window already reaches
+   the end of the day. What remains above the window is reached with «…», and
+   the two controls stay honest about which is which. */
+.col:has(.unfold:checked) .next,
+.col[data-end] .next {
+  display: none;
+}
 
 /* ---- the collapsed column ---------------------------------------------- */
 
 /* Only the rows around the anchor. The server picks that anchor and marks the
    rows, so the page arrives already folded; the client only slides the window
-   onto whatever is on air, which moves three rows and not the document.
+   onto whatever is on air, which moves five rows and not the document.
+
+   The next day's first few broadcasts are in this list too, and they are marked
+   the same way as any other row: at half past eleven the window has run into
+   them, which is how a column stays five rows tall without backing up into the
+   afternoon.
 
    Unfolding is a checkbox rather than a script because the column must be
    openable even when the application bundle never arrives. A hashed asset 404s
    for the five minutes a cached page outlives a deploy, and a second request on
    a phone network fails routinely — neither may leave the visitor looking at
-   three of twenty-seven rows with no way to see the rest.
+   five of twenty-seven rows with no way to see the rest.
 
    `html.js` gates the fold itself, so with scripting off nothing folds at all:
    there would be nothing on hand to unfold it again. */

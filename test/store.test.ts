@@ -14,6 +14,7 @@ import {
   SanityError,
   startRun,
 } from '../src/db/store.ts';
+import { TAIL_SIZE } from '../src/lib/schedule.ts';
 import { mskDay, mskDayStartUtc } from '../src/lib/time.ts';
 
 import type { Database } from 'bun:sqlite';
@@ -135,6 +136,44 @@ describe('programmesForDay', () => {
     replaceProgrammes(db, padded([prog(TNT, evening, 60, 'Закончилось до полуночи')], 20), 10);
 
     expect(programmesForDay(db, NEXT).some((row) => row.title === 'Закончилось до полуночи')).toBe(false);
+  });
+
+  test("carries the next day's first rows, per channel rather than in all", () => {
+    // A global limit would hand the whole tail to whichever channel sorted
+    // first and leave the other nineteen columns ending at 23:00 — which is
+    // exactly the hour at which those rows are the only ones worth reading.
+    const db = fresh();
+    const next = mskDayStartUtc(NEXT);
+    const rows = [TNT, MATCH].flatMap((slug) =>
+      Array.from({ length: TAIL_SIZE + 4 }, (_, index) => prog(slug, next + index * 3600, 60, `${slug} ночь ${index}`)),
+    );
+    replaceProgrammes(db, padded(rows, 20), 10);
+
+    const tail = programmesForDay(db, DAY).filter((row) => row.day === NEXT);
+
+    // In start order, and cut off after the last one anybody would still be up
+    // for: the rest of tomorrow is on tomorrow's page.
+    expect(tail.filter((row) => row.channelSlug === TNT).map((row) => row.title)).toEqual(
+      Array.from({ length: TAIL_SIZE }, (_, index) => `${TNT} ночь ${index}`),
+    );
+    expect(tail.filter((row) => row.channelSlug === MATCH)).toHaveLength(TAIL_SIZE);
+    db.close();
+  });
+
+  test('leaves the tail filed under the day it belongs to', () => {
+    // This is what keeps it out of the search index and off this day's links:
+    // the snapshot builder skips every row whose `day` is not the day it is
+    // rendering, so a tail row that claimed this day would be indexed twice and
+    // linked to a page that does not list it.
+    const db = fresh();
+    const next = mskDayStartUtc(NEXT);
+    replaceProgrammes(db, padded([prog(TNT, next + 600, 30, 'Ночной подкаст')], 20), 10);
+
+    const shown = programmesForDay(db, DAY).find((row) => row.title === 'Ночной подкаст');
+
+    expect(shown).toBeDefined();
+    expect(shown?.day).toBe(NEXT);
+    db.close();
   });
 
   test('returns a day that has no carry-over unchanged', () => {

@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 
+import { todayTabCss } from '../src/client/day-tabs.ts';
 import { CHANNELS, DEFAULT_FAVOURITES, sourceIndex } from '../src/config/channels.ts';
 import { SOURCE_NAMES } from '../src/config/sources.ts';
+import { WINDOW_SIZE } from '../src/lib/schedule.ts';
 import { mskDayStartUtc } from '../src/lib/time.ts';
 import { durationLabel, escapeHtml, renderDayPage } from '../src/render/page.ts';
 
@@ -9,6 +11,7 @@ import type { DayPageInput } from '../src/render/page.ts';
 import type { Programme } from '../src/lib/types.ts';
 
 const DAY = '2026-08-26';
+const NEXT = '2026-08-27';
 const DAYS: readonly string[] = [DAY];
 const SLUG = CHANNELS[0]!.slug;
 
@@ -27,6 +30,15 @@ function page(programmes: readonly Programme[], overrides: Partial<DayPageInput>
     staleNote: undefined,
     ...overrides,
   });
+}
+
+/** The opening tag of the first channel's column, where its own attributes live. */
+function columnTag(html: string): string {
+  const match = new RegExp(`<section class="col" data-ch="${SLUG}"[^>]*>`).exec(html);
+  if (match === null) {
+    throw new Error(`no column found for ${SLUG}`);
+  }
+  return match[0];
 }
 
 /** The `<li>` for the row starting at `startUtc`, so its attributes can be inspected. */
@@ -100,10 +112,130 @@ describe('renderDayPage', () => {
     const html = page(hourly);
 
     expect(html).toContain('data-window');
-    expect((html.match(/ data-near/g) ?? []).length).toBe(3);
+    expect((html.match(/ data-near/g) ?? []).length).toBe(WINDOW_SIZE);
     expect(rowFor(html, dayStart + 18 * 3600)).toContain(' data-near');
-    expect(rowFor(html, dayStart + 19 * 3600)).toContain(' data-near');
+    expect(rowFor(html, dayStart + 22 * 3600)).toContain(' data-near');
     expect(rowFor(html, dayStart + 17 * 3600)).not.toContain(' data-near');
+    expect(rowFor(html, dayStart + 23 * 3600)).not.toContain(' data-near');
+  });
+
+  test('runs the window past midnight when the day has run out', () => {
+    // The rows of the next day are ordinary rows, marked the same way as any
+    // other. That is what keeps a column five rows tall at 23:50: the window
+    // carries on into tomorrow instead of backing up into an afternoon that has
+    // already been on.
+    const dayStart = mskDayStartUtc(DAY);
+    const dayEnd = dayStart + 86_400;
+    // A day that stops at 20:00, so the prime-time anchor is near its end.
+    const own = Array.from({ length: 8 }, (_, index) =>
+      prog(SLUG, dayStart + (12 + index) * 3600, dayStart + (13 + index) * 3600, `Час ${12 + index}`),
+    );
+    const tail = Array.from({ length: 4 }, (_, index) =>
+      prog(SLUG, dayEnd + 600 + index * 3600, dayEnd + 600 + (index + 1) * 3600, `Ночь ${index}`, NEXT),
+    );
+
+    const html = page([...own, ...tail]);
+
+    expect(html).not.toContain('data-tail');
+    expect((html.match(/ data-near/g) ?? []).length).toBe(WINDOW_SIZE);
+    // 18:00 and 19:00 of this day, then three rows of the next one.
+    expect(rowFor(html, dayStart + 18 * 3600)).toContain(' data-near');
+    expect(rowFor(html, dayEnd + 600)).toContain(' data-near');
+    expect(rowFor(html, dayEnd + 600 + 2 * 3600)).toContain(' data-near');
+    // And nothing from before the anchor, which is the half of it that matters.
+    expect(rowFor(html, dayStart + 17 * 3600)).not.toContain(' data-near');
+    expect(html).toContain('<time>00:10</time>');
+  });
+
+  test('counts only this day, however many rows the column shows', () => {
+    // The tail is listed, searched and linked under tomorrow. Counting it here
+    // would make the column claim передач it does not have, and the count is
+    // also the number in «Показать все».
+    const dayStart = mskDayStartUtc(DAY);
+    const dayEnd = dayStart + 86_400;
+    const html = page([
+      prog(SLUG, dayStart + 12 * 3600, dayStart + 13 * 3600, 'Полдень'),
+      prog(SLUG, dayEnd + 600, dayEnd + 3600, 'Подкаст', NEXT),
+    ]);
+
+    expect(html).toContain('>1<span class="vh"> передача</span>');
+    expect(html).toContain('Показать все (1)');
+  });
+
+  test('says nothing about tomorrow in a column with no rows of its own', () => {
+    // Tomorrow's small hours listed under «нет данных за этот день» reads as a
+    // bug rather than as a courtesy.
+    const dayEnd = mskDayStartUtc(DAY) + 86_400;
+    const html = page([prog(SLUG, dayEnd + 600, dayEnd + 3600, 'Подкаст', NEXT)]);
+
+    expect(html).toContain('Нет данных за этот день');
+    expect(html).not.toContain('Подкаст');
+  });
+
+  test('offers «ещё» and «все» as separate controls, and only the second works unaided', () => {
+    // The split is about failure, not taste: the button needs the bundle, the
+    // checkbox does not. A hashed asset 404s for the five minutes a cached page
+    // outlives a deploy, and that must not leave someone stuck at five rows.
+    const dayStart = mskDayStartUtc(DAY);
+    const hourly = Array.from({ length: 24 }, (_, hour) =>
+      prog(SLUG, dayStart + hour * 3600, dayStart + (hour + 1) * 3600, `Час ${hour}`),
+    );
+
+    const html = page(hourly);
+
+    expect(html).toContain(`<button type="button" class="next" disabled>Ещё ${WINDOW_SIZE}</button>`);
+    expect(html).toContain(`<input type="checkbox" id="all-${SLUG}" class="vh unfold">`);
+    // The icon is hidden from the accessible name, so the label still reads as
+    // a sentence to a screen reader.
+    expect(html).toContain('<span class="open" aria-hidden="true">…</span>');
+    expect(html).toContain('<span class="open vh">Показать все (24)</span>');
+  });
+
+  test('marks the column whose window already reaches the end of the day', () => {
+    // «Ещё» goes forwards only, so on such a column it has nothing to offer and
+    // the stylesheet hides it. Decided here as well as in the browser: a control
+    // that disappears after the first paint is movement, and this page is built
+    // not to move.
+    const dayStart = mskDayStartUtc(DAY);
+    // Seven hourly rows from 14:00, so the prime-time anchor is the 18:00 one
+    // and the five-row window runs out at the last row of the day.
+    const afternoon = Array.from({ length: 7 }, (_, index) =>
+      prog(SLUG, dayStart + (14 + index) * 3600, dayStart + (15 + index) * 3600, `Час ${14 + index}`),
+    );
+    const wholeDay = Array.from({ length: 24 }, (_, hour) =>
+      prog(SLUG, dayStart + hour * 3600, dayStart + (hour + 1) * 3600, `Час ${hour}`),
+    );
+
+    // On the section tag, not anywhere in the document: the stylesheet is
+    // inlined and mentions the attribute in a rule of its own.
+    expect(columnTag(page(afternoon))).toContain(' data-end');
+    // A full day has rows below the window, so the button belongs there.
+    expect(columnTag(page(wholeDay))).toContain(' data-window');
+    expect(columnTag(page(wholeDay))).not.toContain(' data-end');
+  });
+
+  test('gives every day tab both labels, and the day it needs to match on', () => {
+    // The server cannot know which tab is today: pages are rebuilt twice a day
+    // and one build outlives midnight. So both labels ship and the boot script
+    // reveals one, keyed on `data-day` — not on the href, which the client
+    // rewrites to `/` for today.
+    const html = renderDayPage({
+      day: DAY,
+      days: [DAY, NEXT],
+      programmes: [],
+      updatedUtc: 1000,
+      source: 'epg.one',
+      staleNote: undefined,
+    });
+
+    expect(html).toContain(
+      `<a href="/day/${NEXT}" data-day="${NEXT}"><span class="date">чт 27 авг</span><span class="now">Сегодня</span></a>`,
+    );
+    expect(todayTabCss(NEXT)).toContain(`.days a[data-day="${NEXT}"]`);
+    // The rule and the markup have to agree on both class names; nothing else
+    // would notice if one of them were renamed.
+    expect(todayTabCss(NEXT)).toContain('.date{display:none}');
+    expect(todayTabCss(NEXT)).toContain('.now{display:inline}');
   });
 
   test('renders a programme carried over from the previous day at the top of the column', () => {

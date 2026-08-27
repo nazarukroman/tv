@@ -6,15 +6,23 @@
  * scripts read it, and it is the one place where a bug shows up as the wrong
  * channel rather than as a misaligned box — so it is the part worth pinning
  * down with tests, and it is testable only while it stays this shape.
+ *
+ * A favourite orders the guide; it never hides anything. Every channel is on
+ * the page from the first paint, so "no favourites" is a perfectly good state
+ * — twenty columns in broadcast order — and nothing in this file has to defend
+ * against an empty list.
  */
 
 /**
  * A stored list, made safe to act on.
  *
- * Two failures are realistic and both must degrade to something sensible: a
- * slug that no longer exists because the line-up changed, and a list that ends
- * up empty. Empty is not "hide everything" — it is "this visitor has expressed
- * no preference", so it falls through to the default.
+ * Only "nothing was ever saved" falls through to the default line-up. An empty
+ * list is a choice — the visitor unstarred everything — and survives as itself,
+ * which it could not do while an empty list meant a blank page.
+ *
+ * A slug the line-up no longer carries is dropped, as is a repeat: both would
+ * otherwise produce an order rule for a column that does not exist, or two for
+ * one that does.
  */
 export function normaliseFavourites(
   saved: readonly string[] | undefined,
@@ -34,7 +42,7 @@ export function normaliseFavourites(
       kept.push(slug);
     }
   }
-  return kept.length > 0 ? kept : fallback;
+  return kept;
 }
 
 /** Adds a slug to the end, or removes it. */
@@ -43,32 +51,42 @@ export function toggleFavourite(list: readonly string[], slug: string): readonly
 }
 
 /**
- * The stylesheet that puts a favourites list on screen.
+ * Display order: favourites first, in the visitor's order, then the rest as
+ * broadcast.
  *
- * Two rules, and which of them is present depends on when this runs.
- *
- * Before first paint there is no DOM to rearrange, so visual order comes from
- * CSS `order` — a channel the visitor did not pick is hidden, and the ones
- * they did are numbered. After the page has painted, the application moves the
- * columns for real and asks for the same CSS without `order`, because `order`
- * leaves the reading order and the tab order disagreeing with the screen. That
- * is WCAG 1.3.2, and at phone width, where the guide is a single column, it is
- * the difference between a usable page and a scrambled one.
- *
- * Doing it in that sequence is what makes it free: the visual result of the
- * two is identical, so the hand-off moves no pixels.
+ * One function for both places a channel list appears — the guide and the "on
+ * air" strip — because "favourites first" has to mean the same thing in both.
+ * Two copies of this rule would drift the moment one of them learned about a
+ * new case.
  */
-export function favouritesCss(favourites: readonly string[], total: number, withOrder: boolean): string {
-  const rules: string[] = [];
+export function favouritesFirst<T extends { readonly slug: string }>(
+  items: readonly T[],
+  favourites: readonly string[],
+): readonly T[] {
+  const bySlug = new Map(items.map((item) => [item.slug, item]));
+  const picked = new Set(favourites);
+  const chosen = favourites.map((slug) => bySlug.get(slug)).filter((item) => item !== undefined);
+  return [...chosen, ...items.filter((item) => !picked.has(item.slug))];
+}
 
-  if (favourites.length < total) {
-    const shown = favourites.map((slug) => `[data-ch="${slug}"]`).join(',');
-    rules.push(`.col:not(${shown}){display:none}`);
-  }
-  if (withOrder) {
-    favourites.forEach((slug, index) => rules.push(`[data-ch="${slug}"]{order:${index + 1}}`));
-  }
-  return rules.join('');
+/**
+ * The stylesheet that puts favourites first before there is any DOM to move.
+ *
+ * The boot script runs while `<head>` is still being parsed, so the columns it
+ * needs to reorder do not exist yet — CSS `order` is the only lever available
+ * that early. Favourites are numbered backwards from zero so that everything
+ * else, sitting at the initial `order: 0`, falls in behind them without needing
+ * a rule of its own: twenty channels cost two declarations, not twenty.
+ *
+ * The application retires this the moment it loads, by moving the columns for
+ * real. It has to: `order` leaves the reading order and the tab order
+ * disagreeing with the screen, which is WCAG 1.3.2, and at phone width — where
+ * the guide is a single column — that is the difference between a usable page
+ * and a scrambled one. The two produce the same picture, so the hand-off moves
+ * no pixels.
+ */
+export function favouritesOrderCss(favourites: readonly string[]): string {
+  return favourites.map((slug, index) => `[data-ch="${slug}"]{order:${index - favourites.length}}`).join('');
 }
 
 /** Every value that is not a list of strings reads as "nothing saved". */

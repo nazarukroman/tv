@@ -9,20 +9,19 @@ import type { Programme } from '../lib/types.ts';
 /**
  * Renders one day's document.
  *
- * Every channel is in the markup, not just the visitor's favourites. That
- * costs a few kilobytes and buys two things worth more: one cached page serves
- * every possible layout, so there are no per-visitor server variants, and
- * changing favourites needs no request at all. With scripting off the page
- * still shows all twenty channels, which is a reasonable default rather than a
- * broken one.
+ * Every channel is in the markup and every channel is on screen. A star is an
+ * ordering preference, never a filter: one cached page serves every possible
+ * layout, so there are no per-visitor server variants, changing favourites
+ * needs no request at all, and with scripting off the page is not a degraded
+ * version of anything — it is the same twenty columns in broadcast order.
  *
  * Two scripts, delivered differently because they are needed at different
  * moments:
  *
- *   BOOT  inline in <head>, parser-blocking on purpose. It puts the visitor's
- *         own channels on screen, in their own order, before the first paint.
- *         Anything later and twenty columns appear and then rearrange into
- *         six. A round trip is out of the question here, so inline it is.
+ *   BOOT  inline in <head>, parser-blocking on purpose. It lifts the visitor's
+ *         starred channels to the top before the first paint. Anything later
+ *         and twenty columns appear and then visibly rearrange. A round trip is
+ *         out of the question here, so inline it is.
  *   APP   an external module, and external is the point: it is byte-identical
  *         on all fifteen day pages, the day tabs are ordinary links, and
  *         inlining would re-send four kilobytes on every day the visitor
@@ -59,8 +58,15 @@ export interface DayPageInput {
   readonly day: string;
   readonly days: readonly string[];
   readonly programmes: readonly Programme[];
-  /** Unix seconds of the last successful ingest, for the footer. */
-  readonly updatedUtc: number;
+  /**
+   * Unix seconds of the last successful feed check, for the footer. Absent
+   * before the first one has ever completed, which is a container that came up
+   * against an empty database — the footer then claims nothing rather than
+   * claiming the current time.
+   */
+  readonly updatedUtc: number | undefined;
+  /** Which feed the rows came from. Absent on an empty database. */
+  readonly source: string | undefined;
   /** Set when serving from the fallback feed, shown as a banner. */
   readonly staleNote: string | undefined;
 }
@@ -117,12 +123,11 @@ function groupByChannel(programmes: readonly Programme[]): Map<string, Programme
  * `data-s`, and across six hundred rows they cost more compressed bytes than
  * everything else on the page.
  */
-function renderProgramme(programme: Programme, primeFrom: number, primeTo: number, near: boolean): string {
+function renderProgramme(programme: Programme, near: boolean): string {
   const seconds = programme.stopUtc - programme.startUtc;
   const minutes = roundedMinutes(programme);
-  const prime = programme.startUtc < primeTo && programme.stopUtc > primeFrom ? ' data-prime' : '';
   return (
-    `<li class="p" data-s="${programme.startUtc}" data-d="${minutes}"${prime}${near ? ' data-near' : ''}>` +
+    `<li class="p" data-s="${programme.startUtc}" data-d="${minutes}"${near ? ' data-near' : ''}>` +
     `<time>${mskClock(programme.startUtc)}</time>` +
     `<b>${escapeHtml(programme.title)}</b>` +
     `<i>${durationLabel(seconds)}</i>` +
@@ -145,9 +150,7 @@ function renderProgramme(programme: Programme, primeFrom: number, primeTo: numbe
  */
 function renderColumn(index: number, programmes: readonly Programme[], day: string): string {
   const channel = CHANNELS[index]!;
-  const dayStart = mskDayStartUtc(day);
-  const primeFrom = dayStart + 18 * 3600;
-  const primeTo = dayStart + 24 * 3600;
+  const primeFrom = mskDayStartUtc(day) + 18 * 3600;
 
   // Windowed on the *rounded* stop times, because that is what the browser
   // will reconstruct from `data-d`. Using the exact seconds here would let the
@@ -160,9 +163,7 @@ function renderColumn(index: number, programmes: readonly Programme[], day: stri
   }));
   const window = collapsedWindow(spans, windowAnchor(spans, undefined, primeFrom));
   const rows = programmes
-    .map((programme, row) =>
-      renderProgramme(programme, primeFrom, primeTo, window !== undefined && row >= window.from && row < window.to),
-    )
+    .map((programme, row) => renderProgramme(programme, window !== undefined && row >= window.from && row < window.to))
     .join('');
 
   const name = escapeHtml(channel.name);
@@ -197,6 +198,26 @@ function renderColumn(index: number, programmes: readonly Programme[], day: stri
   );
 }
 
+/**
+ * The one line of provenance the page carries.
+ *
+ * Both halves are read from the run log rather than assumed. The source was
+ * hardcoded to epg.one, which was true only for as long as the fallback could
+ * not run; the time was the moment the page cache was built, which on a
+ * container restart is the current time printed under whatever age the data
+ * actually is — the exact claim this site exists not to make.
+ */
+function footerNote(updatedUtc: number | undefined, source: string | undefined): string {
+  const parts: string[] = [];
+  if (updatedUtc !== undefined) {
+    parts.push(`Обновлено ${mskClock(updatedUtc)} МСК`);
+  }
+  if (source !== undefined) {
+    parts.push(`источник ${escapeHtml(source)}`);
+  }
+  return parts.length === 0 ? 'Расписание ещё ни разу не загружалось' : parts.join(', ');
+}
+
 export function renderDayPage(input: DayPageInput): string {
   const groups = groupByChannel(input.programmes);
   const columns = CHANNELS.map((channel, index) => renderColumn(index, groups.get(channel.slug) ?? [], input.day)).join(
@@ -204,7 +225,7 @@ export function renderDayPage(input: DayPageInput): string {
   );
 
   const banner = input.staleNote === undefined ? '' : `<div class="stale">${escapeHtml(input.staleNote)}</div>`;
-  const updated = `Обновлено ${mskClock(input.updatedUtc)} МСК, источник epg.one`;
+  const updated = footerNote(input.updatedUtc, input.source);
 
   return `<!doctype html>
 <html lang="ru">
@@ -223,15 +244,10 @@ export function renderDayPage(input: DayPageInput): string {
 ${banner}<header>
 <div class="bar">
 <h1>Телепрограмма</h1>
-<button type="button" id="pick" disabled aria-haspopup="dialog">Каналы</button>
 <input id="q" type="search" disabled placeholder="Поиск передачи" aria-label="Поиск передачи по названию" autocomplete="off" enterkeyhint="search">
 </div>
 ${renderDayNav(input.days, input.day)}
-<div class="sub">
-<input type="checkbox" id="prime" class="vh">
-<label for="prime" id="prime-label">Прайм-тайм 18:00–24:00</label>
-<span id="clock" hidden></span>
-</div>
+<div class="sub"><span id="clock" hidden></span></div>
 </header>
 <section class="live" id="live" aria-labelledby="live-h">
 <h2 id="live-h">Сейчас в эфире</h2>

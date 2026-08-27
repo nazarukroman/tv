@@ -111,6 +111,40 @@ describe('decodeEntities', () => {
   test('leaves an unknown entity untouched instead of mangling it', () => {
     expect(decodeEntities('&unknown;')).toBe('&unknown;');
   });
+
+  test('does not resolve a name inherited from Object.prototype', () => {
+    // The table used to be an object literal, so `ENTITIES['constructor']`
+    // found a function on the prototype chain and `String.replace` stringified
+    // it: a title containing `&constructor;` was stored, indexed and rendered
+    // as «function Object() { [native code] }».
+    expect(decodeEntities('Шоу &constructor; вечер')).toBe('Шоу &constructor; вечер');
+    expect(decodeEntities('&hasOwnProperty;')).toBe('&hasOwnProperty;');
+    expect(decodeEntities('&__proto__;')).toBe('&__proto__;');
+  });
+
+  test.each(['&#1114112;', '&#x110000;', '&#99999999;', '&#xFFFFFFFF;'])(
+    'survives the out-of-range character reference %s',
+    (entity) => {
+      // `String.fromCodePoint` throws a RangeError above U+10FFFF, and the throw
+      // escaped the whole scan: one such entity anywhere in 465 000 elements
+      // aborted the run and left the guide frozen until the feed changed. The
+      // rule everywhere else in this parser applies here too — one bad row
+      // degrades to its literal text, it does not take the run with it.
+      expect(() => decodeEntities(`Титр ${entity} конец`)).not.toThrow();
+      expect(decodeEntities(`Титр ${entity} конец`)).toBe(`Титр ${entity} конец`);
+    },
+  );
+
+  test('refuses a lone surrogate rather than storing a broken character', () => {
+    expect(decodeEntities('&#xD800;')).toBe('&#xD800;');
+  });
+
+  test('still resolves the highest code point that is actually valid', () => {
+    // The bound is inclusive; clipping it one short would silently drop real
+    // characters instead of real bugs.
+    expect(decodeEntities('&#x10FFFF;')).toBe(String.fromCodePoint(0x10_ffff));
+    expect(decodeEntities('&#x41;')).toBe('A');
+  });
 });
 
 describe('scanXmltv', () => {

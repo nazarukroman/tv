@@ -16,9 +16,10 @@
  * rather than forty, and why adding a channel needs no CSS at all.
  *
  * Visibility is expressed as attributes the server or the boot script sets,
- * never as inline styles. Everything the visitor can toggle -- favourites,
- * prime time, the collapsed window, search -- is one attribute plus one rule,
- * so a toggle is a flag flip rather than a walk over six hundred rows.
+ * never as inline styles. Everything the visitor can toggle -- the collapsed
+ * window, search -- is one attribute plus one rule, so a toggle is a flag flip
+ * rather than a walk over six hundred rows. Nothing on this page hides a
+ * channel: every column is present and painted, and a favourite only moves one.
  */
 :root {
   color-scheme: light dark;
@@ -124,10 +125,10 @@ header {
     z-index: 3;
   }
 }
-/* Wraps, and has to. `h1` and the channels button do not shrink, so without a
-   wrap the search field absorbs the whole deficit: at 320px, or at 390px with
-   a large root font, it collapses to a blank pill and the page scrolls
-   sideways. Wrapping puts it on its own line instead. */
+/* Wraps, and has to. `h1` does not shrink, so without a wrap the search field
+   absorbs the whole deficit: at 320px, or at 390px with a large root font, it
+   collapses to a blank pill and the page scrolls sideways. Wrapping puts it on
+   its own line instead. */
 .bar {
   display: flex;
   align-items: center;
@@ -142,13 +143,11 @@ header {
    shoves everything below them down, which is most of the layout shift this
    design is trying not to have. */
 html:not(.js) #q,
-html:not(.js) #pick,
 html:not(.js) .star {
   display: none;
 }
 /* Present and holding their space, but plainly not available yet. */
 #q:disabled,
-#pick:disabled,
 .star:disabled {
   opacity: 0.5;
   cursor: default;
@@ -158,14 +157,11 @@ h1 {
   font-weight: 700;
   margin: 0;
   flex-shrink: 0;
-  /* Pushes the channels button to the far edge and, once the search field
-     wraps below them, leaves the two of them alone on the first line. */
-  margin-right: auto;
 }
-/* Ordered title, channels, search in the markup — which is also the order it
-   is read in and tabbed through. On a phone the search field cannot fit beside
-   the other two, so it wraps to a line of its own and takes the full width
-   instead of being squeezed to a blank pill. */
+/* Title then search, in the markup — which is also the order it is read in and
+   tabbed through. It takes what is left of the line up to a readable maximum,
+   and on a phone, where it cannot fit beside the title at all, it wraps to a
+   line of its own at full width rather than being squeezed to a blank pill. */
 #q {
   flex: 1 1 12rem;
   min-width: 8rem;
@@ -181,15 +177,6 @@ h1 {
 #q::placeholder {
   color: var(--muted);
   opacity: 1;
-}
-#pick {
-  flex-shrink: 0;
-  white-space: nowrap;
-  padding: 0.5rem 0.875rem;
-  background: transparent;
-  border: 1px solid var(--edge);
-  border-radius: 0.5rem;
-  font-size: 0.875rem;
 }
 
 .days {
@@ -219,15 +206,21 @@ h1 {
   font-weight: 600;
 }
 
+/* Holds the clock and nothing else, so it exists only on the day that has one.
+   `html.today` is set by the boot script before the first paint, which is what
+   keeps this from being a strip of padding that appears or vanishes later. */
 .sub {
-  display: flex;
+  display: none;
   align-items: center;
   gap: 0.625rem;
   padding: 0 1rem 0.75rem;
 }
-/* The prime-time filter is a checkbox and a label, not a button and a script:
-   it is the one control on the page whose whole job CSS can do, so it keeps
-   working with scripting off and costs nothing at runtime. */
+html.today .sub {
+  display: flex;
+}
+/* Visually hidden but still there for a screen reader and still operable: the
+   unfold checkbox is the label's control, and the row count needs a noun that
+   the sighted reader gets from context. */
 .vh {
   position: absolute;
   width: 1px;
@@ -238,23 +231,6 @@ h1 {
   clip-path: inset(50%);
   white-space: nowrap;
   border: 0;
-}
-#prime-label {
-  padding: 0.375rem 0.75rem;
-  background: transparent;
-  cursor: pointer;
-  border: 1px solid var(--edge);
-  border-radius: 999px;
-  font-size: 0.8125rem;
-}
-#prime:checked + #prime-label {
-  background: var(--fg);
-  color: var(--bg);
-  border-color: var(--fg);
-}
-#prime:focus-visible + #prime-label {
-  outline: 2px solid var(--fg);
-  outline-offset: 2px;
 }
 #clock {
   font-size: 0.75rem;
@@ -294,6 +270,15 @@ html.today .live {
 }
 .live-track::-webkit-scrollbar {
   display: none;
+}
+/* Fills the reserved box when nothing is on air, rather than letting it
+   collapse. The height above exists so that filling the strip shifts nothing;
+   removing the strip instead spends that reservation the wrong way round. */
+.live-none {
+  margin: 0;
+  padding: 0.5rem 0;
+  color: var(--muted);
+  font-size: 0.875rem;
 }
 .card {
   flex-shrink: 0;
@@ -347,25 +332,14 @@ html.today .live {
    colour is not an option — they are given `--h` and derive the rest here. */
 .col,
 .card,
-.hit,
-.pick-row {
+.hit {
   --accent: oklch(var(--a-l) var(--a-c) var(--h));
   --live-bg: oklch(var(--live-l) var(--live-c) var(--h));
 }
-/* Beats the hiding rule the boot script writes, whichever order the two end up
-   in. Set only when a search result points into a channel the visitor has not
-   chosen; scrolling to a `display:none` row would otherwise do nothing. */
-.col[data-revealed] {
-  display: flex !important;
-}
-/* auto-fit hands all the free space to whatever survives, so one favourite on
-   a wide screen became a 1400px column with the clock stranded at the far left.
-   A cap costs nothing when there are four columns and fixes the case of one. */
 .col {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  max-width: 34rem;
 }
 .col-head {
   position: sticky;
@@ -396,15 +370,23 @@ html.today .live {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* The only channel control on the page now that there is no dialog, so it is
+   sized as one: 2rem square clears the 24px minimum target of WCAG 2.5.8 with
+   room to spare, which the old 21x19 pill did not. */
 .star {
   margin-left: auto;
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
   border: none;
   background: transparent;
   color: var(--muted);
   font-size: 1.0625rem;
   line-height: 1;
-  padding: 0.125rem 0.25rem;
 }
 .star[aria-pressed='true'] {
   color: var(--accent);
@@ -528,36 +510,25 @@ html.js .col[data-window] .more {
   display: inline;
 }
 
-/* ---- the three things a visitor can hide ------------------------------- */
+/* ---- the collapsed column ---------------------------------------------- */
 
-/* Collapsed: only the rows around the anchor. The server picks that anchor and
-   marks the rows, so the page arrives already folded; the client only slides
-   the window onto whatever is on air, which moves three rows and not the
-   document.
+/* Only the rows around the anchor. The server picks that anchor and marks the
+   rows, so the page arrives already folded; the client only slides the window
+   onto whatever is on air, which moves three rows and not the document.
 
-   Unfolding is a checkbox, like the prime-time filter, and for the same reason
-   it is not a script: the column must be openable even when the application
-   bundle never arrives. A hashed asset 404s for the five minutes a cached page
-   outlives a deploy, and a second request on a phone network fails routinely —
-   neither may leave the visitor looking at three of twenty-seven rows with no
-   way to see the rest.
+   Unfolding is a checkbox rather than a script because the column must be
+   openable even when the application bundle never arrives. A hashed asset 404s
+   for the five minutes a cached page outlives a deploy, and a second request on
+   a phone network fails routinely — neither may leave the visitor looking at
+   three of twenty-seven rows with no way to see the rest.
 
-   `html.js` still gates the fold itself, so with scripting off nothing folds at
-   all. Prime time opts out of the window rather than fighting it — with the day
-   narrowed to six hours there is little left to collapse — and it does that by
-   guarding the fold rules rather than by out-specifying them, which is why the
-   three states never argue about precedence. */
-html.js:not(:has(#prime:checked)) .col[data-window] .p:not([data-near]) {
+   `html.js` gates the fold itself, so with scripting off nothing folds at all:
+   there would be nothing on hand to unfold it again. */
+html.js .col[data-window] .p:not([data-near]) {
   display: none;
 }
-html.js:not(:has(#prime:checked)) .col[data-window]:has(.unfold:checked) .p {
+html.js .col[data-window]:has(.unfold:checked) .p {
   display: grid;
-}
-html:has(#prime:checked) .p:not([data-prime]) {
-  display: none;
-}
-html:has(#prime:checked) .more {
-  display: none;
 }
 
 /* Search replaces the guide rather than filtering it: results span every
@@ -644,105 +615,6 @@ body[data-finding] .sub {
   .hit i {
     grid-column: 5;
   }
-}
-
-/* ---- channel picker ---------------------------------------------------- */
-
-dialog {
-  width: min(30rem, 92vw);
-  max-height: 80vh;
-  padding: 1.125rem;
-  background: var(--bg);
-  color: var(--fg);
-  border: 1px solid var(--line);
-  border-radius: 0.875rem;
-}
-dialog::backdrop {
-  background: rgb(0 0 0/0.45);
-}
-.pick-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 0.25rem;
-}
-.pick-top h2 {
-  font-size: 1.0625rem;
-  font-weight: 700;
-  margin: 0;
-}
-.pick-x {
-  border: none;
-  background: transparent;
-  color: var(--muted);
-  font-size: 1.25rem;
-  line-height: 1;
-  padding: 0 0.25rem;
-}
-.pick-hint {
-  font-size: 0.8125rem;
-  color: var(--muted);
-  margin: 0 0 0.625rem;
-}
-.pick-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-.pick-row {
-  display: flex;
-  align-items: center;
-  gap: 0.625rem;
-  padding: 0.5rem 0.25rem;
-  border-bottom: 1px solid var(--line-soft);
-}
-.pick-row input {
-  width: 1rem;
-  height: 1rem;
-  flex-shrink: 0;
-  accent-color: var(--fg);
-}
-.pick-row label {
-  flex: 1;
-  min-width: 0;
-  font-size: 0.875rem;
-}
-.pick-move {
-  display: flex;
-  gap: 0.25rem;
-  flex-shrink: 0;
-}
-.pick-move button {
-  width: 1.625rem;
-  height: 1.625rem;
-  padding: 0;
-  border: 1px solid var(--edge);
-  border-radius: 0.375rem;
-  background: transparent;
-}
-.pick-move button[disabled] {
-  opacity: 0.35;
-  cursor: default;
-}
-.pick-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.625rem;
-  margin-top: 0.875rem;
-}
-.pick-n {
-  font-size: 0.75rem;
-  color: var(--muted);
-}
-.pick-ok {
-  padding: 0.5rem 1.125rem;
-  border: none;
-  border-radius: 0.5rem;
-  background: var(--fg);
-  color: var(--bg);
-  font-size: 0.875rem;
-  font-weight: 600;
 }
 
 /* ---- chrome ------------------------------------------------------------ */

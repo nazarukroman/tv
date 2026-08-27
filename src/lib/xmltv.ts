@@ -32,14 +32,24 @@ const MAX_ELEMENT_CHARS = 1 << 20;
  */
 const LOOKAHEAD_CHARS = '<programme '.length;
 
-const ENTITIES: Readonly<Record<string, string>> = {
-  amp: '&',
-  lt: '<',
-  gt: '>',
-  quot: '"',
-  apos: "'",
-  nbsp: ' ',
-};
+/**
+ * A `Map`, not an object literal, and the difference is not stylistic: the key
+ * is a substring of the feed. `ENTITIES['constructor']` on an object literal
+ * resolves through `Object.prototype` and returns a function, so `&constructor;`
+ * in a title rendered as `function Object() { [native code] }` and was stored
+ * that way. A `Map` has no prototype chain to fall through.
+ */
+const ENTITIES: ReadonlyMap<string, string> = new Map([
+  ['amp', '&'],
+  ['lt', '<'],
+  ['gt', '>'],
+  ['quot', '"'],
+  ['apos', "'"],
+  ['nbsp', ' '],
+]);
+
+/** The highest code point Unicode defines; above it `String.fromCodePoint` throws. */
+const MAX_CODE_POINT = 0x10_ffff;
 
 /**
  * Titles arrive with a Russian content-type prefix on a large share of rows —
@@ -56,6 +66,11 @@ export interface XmltvHandlers {
   readonly onProgramme?: (programme: Programme) => void;
 }
 
+/** A value `String.fromCodePoint` will accept and that means a real character. */
+function isCodePoint(code: number): boolean {
+  return Number.isInteger(code) && code > 0 && code <= MAX_CODE_POINT && (code < 0xd800 || code > 0xdfff);
+}
+
 /** Resolves the entity forms XMLTV actually emits, including numeric ones. */
 export function decodeEntities(raw: string): string {
   if (!raw.includes('&')) {
@@ -66,9 +81,14 @@ export function decodeEntities(raw: string): string {
     if (body.startsWith('#')) {
       const isHex = body[1] === 'x' || body[1] === 'X';
       const code = Number.parseInt(isHex ? body.slice(2) : body.slice(1), isHex ? 16 : 10);
-      return Number.isFinite(code) && code > 0 ? String.fromCodePoint(code) : whole;
+      // Bounded, not merely positive. `String.fromCodePoint` throws a RangeError
+      // above U+10FFFF, and the throw escaped all the way out of the scan — so
+      // one `&#1114112;` anywhere in 465 000 elements aborted the entire run.
+      // A lone surrogate is refused for the same reason `parseXmltvTime` refuses
+      // a malformed date: it would be stored and rendered as a broken character.
+      return isCodePoint(code) ? String.fromCodePoint(code) : whole;
     }
-    return ENTITIES[body.toLowerCase()] ?? whole;
+    return ENTITIES.get(body.toLowerCase()) ?? whole;
   });
 }
 

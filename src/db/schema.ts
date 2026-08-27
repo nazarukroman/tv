@@ -57,6 +57,19 @@ const MIGRATIONS: readonly string[] = [
     error         TEXT
   );
   `,
+  // A channel no longer has *a* source id — it has one per feed, and the pins
+  // live in config where they are type-checked against the source list. The
+  // column only ever mirrored epg.one's, was read by nothing, and would now be
+  // a third place to forget when a pin moves.
+  `
+  ALTER TABLE channel DROP COLUMN source_id;
+  `,
+  // The staleness answer is "when did a feed last confirm this", which is a scan
+  // of every run ordered by finish time. Cheap either way at a few hundred rows,
+  // but it is asked on every snapshot build.
+  `
+  CREATE INDEX ingest_run_good ON ingest_run (ok, finished_at);
+  `,
 ];
 
 /** Applies any migration the database has not seen, using `user_version`. */
@@ -79,10 +92,9 @@ function migrate(db: Database): void {
 /** Mirrors the channel config into the database so joins and cascades work. */
 function syncChannels(db: Database): void {
   const upsert = db.prepare(`
-    INSERT INTO channel (slug, source_id, name, mux, sort_order)
-    VALUES ($slug, $sourceId, $name, $mux, $order)
+    INSERT INTO channel (slug, name, mux, sort_order)
+    VALUES ($slug, $name, $mux, $order)
     ON CONFLICT(slug) DO UPDATE SET
-      source_id  = excluded.source_id,
       name       = excluded.name,
       mux        = excluded.mux,
       sort_order = excluded.sort_order
@@ -94,7 +106,6 @@ function syncChannels(db: Database): void {
     CHANNELS.forEach((channel, index) => {
       upsert.run({
         slug: channel.slug,
-        sourceId: channel.sourceId,
         name: channel.name,
         mux: channel.mux,
         order: index,

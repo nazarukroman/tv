@@ -5,9 +5,12 @@ FROM oven/bun:1.4.0-alpine
 
 WORKDIR /app
 
-# No build step and no runtime dependencies — Bun ships the SQLite driver and
-# the HTTP server, and the page is rendered from TypeScript directly. Only the
-# dev toolchain lives in package.json, so nothing is installed here.
+# No build step and no runtime dependencies — Bun ships the SQLite driver, the
+# HTTP server and the bundler, and the page is rendered from TypeScript
+# directly. The client bundle is built by the process itself at start-up, which
+# is why only sources are copied: there is no artefact here that could drift
+# out of sync with them. Only the dev toolchain lives in package.json, so
+# nothing is installed.
 COPY package.json ./
 COPY src/ src/
 

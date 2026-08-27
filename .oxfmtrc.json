@@ -6,5 +6,5 @@
   "tabWidth": 2,
   "useTabs": false,
   "sortPackageJson": false,
-  "ignorePatterns": ["**/node_modules/**", "**/dist/**", "**/data/**", "**/*.d.ts", "**/*.min.js"]
+  "ignorePatterns": ["**/node_modules/**", "**/design/**", "**/dist/**", "**/data/**", "**/*.d.ts", "**/*.min.js"]
 }

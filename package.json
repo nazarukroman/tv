@@ -6,7 +6,7 @@
   "description": "Телепрограмма двадцати эфирных каналов без рекламы",
   "scripts": {
     "ingest": "bun run src/ingest.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.client.json",
     "test": "bun test",
     "format": "oxfmt",
     "format:check": "oxfmt --check",

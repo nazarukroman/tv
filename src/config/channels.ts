@@ -44,6 +44,24 @@ export const CHANNELS: readonly Channel[] = [
 /** Shown when the visitor has picked no favourites yet. */
 export const DEFAULT_FAVOURITES: readonly string[] = ['pervy', 'rossia1', 'ntv', 'tnt', 'sts', 'matchtv'];
 
+/**
+ * The channel's identity colour, as an OKLCH hue in degrees.
+ *
+ * Spread evenly around the wheel by position rather than picked per channel,
+ * and deliberately so: these are wayfinding marks that must stay apart from
+ * each other, not brand colours. Hand-picking twenty would collide — six of
+ * these broadcasters use much the same red — and a hash of the slug collides
+ * by chance. Lightness and chroma come from the theme, so only the hue lives
+ * here; the stylesheet assembles the colour.
+ *
+ * The cost of deriving from position is that inserting a channel mid-list
+ * reshuffles every colour after it. Acceptable: the list is the two fixed
+ * terrestrial multiplexes and has not changed since 2019.
+ */
+export function channelHue(index: number): number {
+  return (10 + index * 18) % 360;
+}
+
 /** epg.one source id -> our slug. The lookup the parser hits once per programme. */
 export const SOURCE_ID_TO_SLUG: ReadonlyMap<string, string> = new Map(
   CHANNELS.map((channel) => [channel.sourceId, channel.slug]),

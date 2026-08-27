@@ -55,6 +55,12 @@ export function mskDay(unixSeconds: number): string {
   return `${year}-${month}-${day}`;
 }
 
+/** Moscow midnight that opens `day` (`YYYY-MM-DD`), as unix seconds. */
+export function mskDayStartUtc(day: string): number {
+  const [year, month, date] = day.split('-').map(Number);
+  return Date.UTC(year!, month! - 1, date!) / 1000 - MSK_OFFSET_SECONDS;
+}
+
 /** `HH:MM` in Moscow time, the only clock the guide ever shows. */
 export function mskClock(unixSeconds: number): string {
   const shifted = new Date((unixSeconds + MSK_OFFSET_SECONDS) * 1000);

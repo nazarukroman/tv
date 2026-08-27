@@ -15,5 +15,11 @@
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true
   },
-  "include": ["src", "test"]
+
+  // The browser half is checked separately, by tsconfig.client.json, against a
+  // different set of globals. Keeping DOM out of this project is what stops
+  // server code from quietly referencing `document`, and keeping `bun` out of
+  // that one stops client code from referencing `Bun`.
+  "include": ["src", "test"],
+  "exclude": ["src/client"]
 }

@@ -1,3 +1,4 @@
+import { TAIL_SIZE } from '../lib/schedule.ts';
 import { mskDay, mskDayStartUtc } from '../lib/time.ts';
 
 import type { Database } from 'bun:sqlite';
@@ -218,16 +219,24 @@ export function finishRun(db: Database, id: number, nowUtc: number, outcome: Fin
 /**
  * Every programme a viewer looking at `day` should see, in render order.
  *
- * That is the day's own rows plus whatever was still running when the day
- * began. A programme is filed under the day it *starts* on, so a broadcast from
- * 23:40 to 01:15 belongs to yesterday — and asking for `day = $day` alone left
- * the top of every column empty for as long as it ran. Nothing was on air
- * according to the page, so no row was marked live and the «Сейчас в эфире»
- * strip had nothing to show, every night, for the first stretch of the day.
+ * Three things, and only the first is the day itself.
  *
- * The carried-over row keeps its own `day`, which is what lets the renderer and
- * the search index tell it apart from a row of this day: it is shown here, but
- * it is listed and linked under yesterday.
+ * Whatever was still running when the day began comes with it. A programme is
+ * filed under the day it *starts* on, so a broadcast from 23:40 to 01:15
+ * belongs to yesterday — and asking for `day = $day` alone left the top of
+ * every column empty for as long as it ran. Nothing was on air according to the
+ * page, so no row was marked live and the «Сейчас в эфире» strip had nothing to
+ * show, every night, for the first stretch of the day.
+ *
+ * And the first `TAIL_SIZE` rows of the next day come with it too, because at
+ * 23:30 those are the only rows anyone is reading and they would otherwise be
+ * one navigation away.
+ *
+ * Both keep their own `day`, which is what lets the renderer and the search
+ * index tell them apart from a row of this day: they are shown here, but they
+ * are listed and linked under the day they belong to. That is also why the tail
+ * is not a third query's worth of special cases downstream — `day` already says
+ * everything about it.
  */
 export function programmesForDay(db: Database, day: string): Programme[] {
   const dayStart = mskDayStartUtc(day);
@@ -240,7 +249,24 @@ export function programmesForDay(db: Database, day: string): Programme[] {
     )
     .all({ day, previous: mskDay(dayStart - 1), dayStart });
 
-  return rows.map((row) => ({
+  // Ranked in SQL rather than fetched and sliced here: the next day is another
+  // six hundred rows, and this reads sixty. `programme_by_day` is
+  // (day, channel_slug, start_utc), which is exactly this partition and order.
+  const tail = db
+    .query<ProgrammeRow, { next: string; keep: number }>(
+      `SELECT channel_slug, start_utc, stop_utc, day, title, description
+       FROM (
+         SELECT channel_slug, start_utc, stop_utc, day, title, description,
+                ROW_NUMBER() OVER (PARTITION BY channel_slug ORDER BY start_utc) AS rn
+         FROM programme
+         WHERE day = $next
+       )
+       WHERE rn <= $keep
+       ORDER BY channel_slug, start_utc`,
+    )
+    .all({ next: mskDay(dayStart + 86_400), keep: TAIL_SIZE });
+
+  return [...rows, ...tail].map((row) => ({
     channelSlug: row.channel_slug,
     startUtc: row.start_utc,
     stopUtc: row.stop_utc,

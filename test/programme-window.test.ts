@@ -3,9 +3,11 @@ import { describe, expect, test } from 'bun:test';
 import {
   ALWAYS_SHOW_UP_TO,
   collapsedWindow,
+  extendedWindow,
   liveIndex,
   progressPercent,
   remainingLabel,
+  TAIL_SIZE,
   windowAnchor,
   WINDOW_SIZE,
 } from '../src/lib/schedule.ts';
@@ -68,23 +70,38 @@ describe('windowAnchor', () => {
     expect(windowAnchor(day, undefined, PRIME)).toBe(36);
   });
 
-  test('a day that has not started yet anchors on prime time, not on midnight', () => {
-    // The old behaviour was "the next programme to start", which on tomorrow's
-    // page meant opening at 00:10. Nobody plans an evening from that.
-    expect(windowAnchor(day, -3600, PRIME)).toBe(36);
+  test('a gap in the schedule anchors on what is about to start', () => {
+    const spans: Span[] = [
+      { startUtc: 0, stopUtc: 100 },
+      { startUtc: 200, stopUtc: 300 },
+    ];
+    expect(windowAnchor(spans, 150, PRIME)).toBe(1);
   });
 
-  test('a day that is over anchors on prime time too', () => {
-    expect(windowAnchor(day, 100 * 3600, PRIME)).toBe(36);
+  test('a schedule the clock is past entirely anchors on the last row', () => {
+    // Production never asks this — the client passes a clock only while the day
+    // on screen is today — but the answer has to be inside the array.
+    expect(windowAnchor(day, 100 * 3600, PRIME)).toBe(47);
   });
 
-  test('the server and the client agree on any day that is not today', () => {
-    // This is the property that keeps the page from rearranging itself a
-    // moment after it appears: the renderer passes undefined, the browser
-    // passes a real instant outside the day, and both must land on the same row.
-    for (const now of [-86_400, -1, 48 * 1800, 10 * 86_400]) {
-      expect(windowAnchor(day, now, PRIME)).toBe(windowAnchor(day, undefined, PRIME));
-    }
+  test('the renderer and the client agree on any day that is not today', () => {
+    // This is the property that keeps the page from rearranging itself a moment
+    // after it appears, and it holds by construction: the client passes a clock
+    // only for today (`today ? now : undefined`), so on every other day both
+    // callers make this exact call.
+    expect(windowAnchor(day, undefined, PRIME)).toBe(36);
+  });
+
+  test('once the day has run out, the anchor is the next day’s first row', () => {
+    // The whole point of carrying the next day's rows: at 23:50 the evening is
+    // over, and what the column should be built around is what comes after
+    // midnight — not the afternoon, which is where the old prime-time fallback
+    // sent it.
+    const evening = spansOf(4, 20 * 3600); // 20:00 through 22:00
+    const tomorrow = spansOf(3, 24 * 3600 + 600); // 00:10 onwards
+    const spans = [...evening, ...tomorrow];
+
+    expect(windowAnchor(spans, 23 * 3600, PRIME)).toBe(4);
   });
 
   test('a day whose programmes all end before prime time anchors on the last row', () => {
@@ -118,10 +135,23 @@ describe('collapsedWindow', () => {
     }
   });
 
-  test('slides back rather than running short at the end of the day', () => {
+  test('slides back rather than running short at the end of everything', () => {
     const spans = spansOf(10);
     // Anchored on the very last row, the window keeps its height by moving up.
-    expect(collapsedWindow(spans, 9)).toEqual({ from: 7, to: 10 });
+    expect(collapsedWindow(spans, 9)).toEqual({ from: 5, to: 10 });
+  });
+
+  test('crosses midnight instead of sliding back, because the next day is in the list', () => {
+    // Sliding back is the last resort, not what happens every evening: the
+    // column carries the next day's first rows, so at 23:50 there is still
+    // something after the anchor and the five rows carry on past midnight
+    // rather than backing up into an afternoon that has already been on.
+    const evening = spansOf(4, 20 * 3600);
+    const tomorrow = spansOf(TAIL_SIZE, 24 * 3600 + 600);
+    const spans = [...evening, ...tomorrow];
+
+    const anchor = windowAnchor(spans, 21 * 3600 + 1800, 18 * 3600); // 21:30, on air
+    expect(collapsedWindow(spans, anchor)).toEqual({ from: 3, to: 8 });
   });
 
   test('never returns a slice outside the array, across many lengths and times', () => {
@@ -142,8 +172,44 @@ describe('collapsedWindow', () => {
 
   test('an anchor outside the array is clamped rather than trusted', () => {
     const spans = spansOf(10);
-    expect(collapsedWindow(spans, -5)).toEqual({ from: 0, to: 3 });
-    expect(collapsedWindow(spans, 99)).toEqual({ from: 7, to: 10 });
+    expect(collapsedWindow(spans, -5)).toEqual({ from: 0, to: 5 });
+    expect(collapsedWindow(spans, 99)).toEqual({ from: 5, to: 10 });
+  });
+});
+
+describe('extendedWindow', () => {
+  test('grows forwards, leaving the top of the window where it was', () => {
+    const spans = spansOf(20);
+    expect(extendedWindow(spans, 4, 0)).toEqual({ from: 4, to: 9 });
+    expect(extendedWindow(spans, 4, WINDOW_SIZE)).toEqual({ from: 4, to: 14 });
+    expect(extendedWindow(spans, 4, WINDOW_SIZE * 2)).toEqual({ from: 4, to: 19 });
+  });
+
+  test('never uncovers a row above the window, least of all at the end of the day', () => {
+    // The bug this pins down: growing the base window by handing it a larger
+    // size took `to` to the end of the day and then computed `from = to - size`,
+    // so "show me more" answered by revealing the afternoon that had already
+    // been on — with nothing new below at all. On a column whose window already
+    // sits at the end, more of it is simply nothing.
+    const spans = spansOf(10);
+    const base = collapsedWindow(spans, 9)!;
+    for (const extra of [WINDOW_SIZE, WINDOW_SIZE * 3, 100]) {
+      const grown = extendedWindow(spans, 9, extra)!;
+      expect(grown.from).toBe(base.from);
+      expect(grown.to).toBe(spans.length);
+    }
+  });
+
+  test('stops at the last row rather than running past the array', () => {
+    const spans = spansOf(12);
+    expect(extendedWindow(spans, 0, 100)).toEqual({ from: 0, to: 12 });
+  });
+
+  test('has nothing to grow on a column that was never folded', () => {
+    // The button is not rendered at all in that case, and the client asks
+    // anyway on every tick — so this has to answer the same "show everything"
+    // the base window does rather than inventing a slice.
+    expect(extendedWindow(spansOf(ALWAYS_SHOW_UP_TO), 0, WINDOW_SIZE)).toBeUndefined();
   });
 });
 

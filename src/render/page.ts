@@ -1,6 +1,6 @@
 import { CHANNELS, channelHue } from '../config/channels.ts';
 import { dayLabel, humanDay, plural } from '../lib/labels.ts';
-import { collapsedWindow, windowAnchor } from '../lib/schedule.ts';
+import { collapsedWindow, windowAnchor, WINDOW_SIZE } from '../lib/schedule.ts';
 import { mskClock, mskDayStartUtc } from '../lib/time.ts';
 import { APP_ASSET, BOOT_SCRIPT, STYLES } from './bundle.ts';
 
@@ -87,11 +87,33 @@ function roundedMinutes(programme: Programme): number {
   return Math.round((programme.stopUtc - programme.startUtc) / 60);
 }
 
+/**
+ * The day tabs, each carrying both of its possible labels.
+ *
+ * The server cannot pick out today. Pages are rebuilt twice a day and one of
+ * those builds is still being served after midnight, so at render time "which
+ * of my fifteen tabs is today" has no answer here. Only the browser knows, and
+ * the browser must not answer it after the first paint: a tab that changes
+ * width once the page is on screen shifts every tab after it.
+ *
+ * So every tab ships «Сегодня» alongside its date, the stylesheet hides the
+ * former, and the boot script — still inside `<head>` — un-hides exactly one of
+ * them with a rule keyed on `data-day`. Fifteen extra words cost a few bytes
+ * compressed; a round trip or a reflow costs neither of those things.
+ *
+ * `data-day` rather than the `href`, because the application rewrites today's
+ * tab to point at `/` — a rule matching on the href would come undone at
+ * precisely the moment it applies.
+ */
 function renderDayNav(days: readonly string[], current: string): string {
   const links = days
     .map((day) => {
       const mark = day === current ? ' aria-current="date"' : '';
-      return `<a href="/day/${day}"${mark}>${dayLabel(day)}</a>`;
+      return (
+        `<a href="/day/${day}" data-day="${day}"${mark}>` +
+        `<span class="date">${dayLabel(day)}</span>` +
+        `<span class="now">Сегодня</span></a>`
+      );
     })
     .join('');
   return `<nav class="days" aria-label="Дни">${links}</nav>`;
@@ -122,6 +144,10 @@ function groupByChannel(programmes: readonly Programme[]): Map<string, Programme
  * absolute end, and no ISO `datetime`: both were high-entropy restatements of
  * `data-s`, and across six hundred rows they cost more compressed bytes than
  * everything else on the page.
+ *
+ * Rows of the next day are not marked in any way, and that is the point: they
+ * are ordinary rows, so the window slides into them when the day runs out and
+ * the column stays five rows tall instead of backing into the afternoon.
  */
 function renderProgramme(programme: Programme, near: boolean): string {
   const seconds = programme.stopUtc - programme.startUtc;
@@ -142,7 +168,11 @@ function renderProgramme(programme: Programme, near: boolean): string {
  * from rearranging itself after it appears. The document cannot know the time
  * — one copy is cached for everybody — so it collapses around the start of
  * prime time, and the client slides the window onto whatever is actually on
- * air. Three rows become three different rows: the page barely moves.
+ * air. Five rows become five different rows: the page barely moves.
+ *
+ * The column's rows are this day's plus the first few of the next, and they are
+ * windowed as one list. Late in the evening that is the difference between five
+ * rows that carry on past midnight and five rows backing up into the afternoon.
  *
  * Leaving it to the client instead would mean painting the whole day, up to
  * twenty thousand pixels of it on a phone, and then folding it away. That is a
@@ -150,8 +180,14 @@ function renderProgramme(programme: Programme, near: boolean): string {
  */
 function renderColumn(index: number, programmes: readonly Programme[], day: string): string {
   const channel = CHANNELS[index]!;
-  const primeFrom = mskDayStartUtc(day) + 18 * 3600;
+  const dayStart = mskDayStartUtc(day);
+  const primeFrom = dayStart + 18 * 3600;
 
+  // Every row the column carries, this day's and the next day's, in one list —
+  // and windowed as one list. That is what makes a column five rows tall at
+  // 23:50: the window runs past midnight instead of backing up into the
+  // afternoon, which is the only other way to keep a column its full height.
+  //
   // Windowed on the *rounded* stop times, because that is what the browser
   // will reconstruct from `data-d`. Using the exact seconds here would let the
   // two disagree by up to thirty seconds, which is enough to pick a different
@@ -166,17 +202,43 @@ function renderColumn(index: number, programmes: readonly Programme[], day: stri
     .map((programme, row) => renderProgramme(programme, window !== undefined && row >= window.from && row < window.to))
     .join('');
 
+  // The count in the heading is this day's own, though: a programme is filed
+  // under the day it starts on, so anything from midnight belongs to tomorrow's
+  // page, is searched and linked there, and a column claiming передач it does
+  // not have would be the one dishonest number on the page.
+  const dayEnd = dayStart + 86_400;
+  const own = programmes.filter((programme) => programme.startUtc < dayEnd).length;
+
   const name = escapeHtml(channel.name);
-  // A checkbox and a label rather than a button: unfolding must survive the
-  // application bundle failing to arrive, and CSS can do this one on its own.
+  // Two controls, and the difference between them is which failure each one has
+  // to survive.
+  //
+  // «Ещё 5» is a button the application drives: it widens the same window the
+  // server folded, so the minute tick keeps it open instead of undoing it.
+  // Rendered disabled, like the search field and the stars, so that a bundle
+  // that never arrives leaves a control that is visibly unavailable rather than
+  // one that silently does nothing.
+  //
+  // «…» is a checkbox and a label, and it is the one that has to work with no
+  // script at all: a hashed asset 404s for the five minutes a cached page
+  // outlives a deploy, and a second request on a phone network fails routinely.
+  // Neither may leave someone looking at five rows of twenty-seven with no way
+  // to see the rest, so CSS owns this one on its own. Icon rather than words
+  // because "show the next few" is what people actually want and it deserves
+  // the readable label.
   const unfold =
+    `<div class="tools">` +
+    `<button type="button" class="next" disabled>Ещё ${WINDOW_SIZE}</button>` +
     `<input type="checkbox" id="all-${channel.slug}" class="vh unfold">` +
     `<label class="more" for="all-${channel.slug}">` +
-    `<span class="open">Показать все (${programmes.length})</span>` +
-    `<span class="shut">Свернуть</span></label>`;
+    `<span class="open" aria-hidden="true">…</span>` +
+    `<span class="open vh">Показать все (${own})</span>` +
+    `<span class="shut">Свернуть</span></label>` +
+    `</div>`;
 
-  const body =
-    programmes.length === 0 ? '<p class="none">Нет данных за этот день</p>' : `<ol class="progs">${rows}</ol>${unfold}`;
+  // No rows of its own means no column: tomorrow's small hours listed beneath
+  // "нет данных за этот день" read as a bug rather than as a courtesy.
+  const body = own === 0 ? '<p class="none">Нет данных за этот день</p>' : `<ol class="progs">${rows}</ol>${unfold}`;
 
   // The heading is the channel name and nothing else. Wrapping the star and
   // the count inside the <h2> made its accessible name "Первый канал Первый
@@ -184,16 +246,23 @@ function renderColumn(index: number, programmes: readonly Programme[], day: stri
   // its content — including a button's aria-label. Heading navigation is the
   // main way a screen reader moves through twenty columns, so it has to read
   // as the channel.
-  const noun = plural(programmes.length, 'передача', 'передачи', 'передач');
+  const noun = plural(own, 'передача', 'передачи', 'передач');
+
+  // `data-end` says the window has nothing after it left to show — the next
+  // day's rows included — so «Ещё» has no work and the stylesheet hides it.
+  // Decided here as well as in the browser because a control that appears or
+  // disappears after the first paint is the kind of movement this page is built
+  // not to have.
+  const atEnd = window !== undefined && window.to >= spans.length;
 
   return (
     `<section class="col" data-ch="${channel.slug}" style="--h:${channelHue(index)}"` +
-    `${window === undefined ? '' : ' data-window'}>` +
+    `${window === undefined ? '' : ' data-window'}${atEnd ? ' data-end' : ''}>` +
     `<div class="col-head">` +
     `<span class="dot"></span>` +
     `<h2 class="col-name">${name}</h2>` +
     `<button type="button" class="star" disabled aria-pressed="false" aria-label="${name} — в избранное">☆</button>` +
-    `<span class="col-n">${programmes.length}<span class="vh"> ${noun}</span></span>` +
+    `<span class="col-n">${own}<span class="vh"> ${noun}</span></span>` +
     `</div>${body}</section>`
   );
 }

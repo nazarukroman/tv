@@ -1,0 +1,14 @@
+{
+  // The browser half. Same strictness, different world: DOM instead of Bun.
+  //
+  // `types: []` is the load-bearing line. It denies the client bundle every
+  // server global, so a stray `Bun.file` or `process.env` in code that ships
+  // to a phone fails the build rather than the page.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "types": []
+  },
+  "include": ["src/client"],
+  "exclude": []
+}

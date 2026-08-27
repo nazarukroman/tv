@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "ignorePatterns": ["**/node_modules/**", "**/dist/**", "**/data/**", "**/*.d.ts", "**/*.min.js"],
+  "ignorePatterns": ["**/node_modules/**", "**/design/**", "**/dist/**", "**/data/**", "**/*.d.ts", "**/*.min.js"],
   "plugins": ["typescript", "import", "oxc"],
   "categories": {
     "correctness": "error",

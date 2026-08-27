@@ -1,6 +1,9 @@
 /node_modules/
 /data/
 /dist/
+# Claude Design canvas working files: a 69 KB vendored runtime plus generated
+# mockups. The reference is the implemented page, not these.
+/design/
 .env
 *.log
 

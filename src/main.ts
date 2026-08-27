@@ -48,11 +48,11 @@ export function msUntilNextRefresh(fromMs: number): number {
   return dayStart + 86_400_000 + first * 3600_000 + REFRESH_MINUTE * 60_000 - local;
 }
 
-async function runIngest(db: Database, rebuild: () => void): Promise<void> {
+async function runIngest(db: Database, rebuild: () => Promise<void>): Promise<void> {
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
     try {
       await ingest(db);
-      rebuild();
+      await rebuild();
       return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -69,7 +69,7 @@ async function runIngest(db: Database, rebuild: () => void): Promise<void> {
   }
 }
 
-function scheduleForever(db: Database, rebuild: () => void): void {
+function scheduleForever(db: Database, rebuild: () => Promise<void>): void {
   const tick = (): void => {
     const wait = msUntilNextRefresh(Date.now());
     setTimeout(() => {
@@ -83,7 +83,7 @@ function scheduleForever(db: Database, rebuild: () => void): void {
 if (import.meta.main) {
   const db = openDatabase(process.env.TV_DB ?? DEFAULT_DB_PATH);
   const port = Number(process.env.TV_PORT ?? DEFAULT_PORT);
-  const { server, rebuild } = startServer(db, port);
+  const { server, rebuild } = await startServer(db, port);
   console.log(`tv on http://${server.hostname}:${server.port}`);
 
   const runway = horizonUtc(db) - nowUtc();
